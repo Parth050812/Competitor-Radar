@@ -1,0 +1,411 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Competitor Radar</title>
+<link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@500;700&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.css">
+<style>
+:root{--ink:#111;--lime:#d4ff3a}
+*{box-sizing:border-box}
+[hidden]{display:none!important}
+body{margin:0;font:500 16px/1.5 "Space Grotesk",Arial,sans-serif;color:var(--ink);min-height:100vh;background:linear-gradient(135deg,#eeff5c 0%,#d9ff47 35%,#b5f5b0 75%,#a5efc4 100%) fixed}
+.wrap{max-width:1150px;margin:auto;padding:20px}
+header{display:flex;justify-content:space-between;align-items:center;gap:16px;flex-wrap:wrap}
+h1{font-size:clamp(28px,5vw,46px);margin:0;text-transform:uppercase;letter-spacing:-1px;line-height:1.1}
+h1 span{background:var(--lime);padding:0 8px;border:3px solid var(--ink);box-shadow:4px 4px 0 var(--ink)}
+h2,h3{margin:0 0 8px;text-transform:uppercase}h3{text-transform:none}
+.sub{margin:6px 0 0}
+.card{background:#fff;border:3px solid var(--ink);box-shadow:6px 6px 0 var(--ink);padding:16px;margin:0 0 20px}
+.tip{background:#fdffb8;border:3px solid var(--ink);padding:10px 14px;margin-bottom:18px;font-weight:700}
+.btn{background:var(--lime);border:3px solid var(--ink);box-shadow:4px 4px 0 var(--ink);padding:10px 16px;cursor:pointer;text-transform:uppercase;font-weight:700;font-family:inherit;font-size:14px;color:var(--ink)}
+.btn:hover{transform:translate(-2px,-2px);box-shadow:6px 6px 0 var(--ink)}
+.btn:active{transform:translate(3px,3px);box-shadow:1px 1px 0 var(--ink)}
+.btn:disabled{opacity:.75;cursor:wait}
+.btn.sm{padding:5px 10px;font-size:12px;box-shadow:3px 3px 0 var(--ink)}
+.btn.red{background:#fff}
+.busy::before{content:"";display:inline-block;width:12px;height:12px;border:3px solid var(--ink);border-top-color:transparent;border-radius:50%;margin-right:8px;vertical-align:-2px;animation:sp .7s linear infinite}
+@keyframes sp{to{transform:rotate(360deg)}}
+input,select{font:inherit;padding:10px;border:3px solid var(--ink);background:#fff;min-width:0;color:var(--ink)}
+.bar-row{display:flex;gap:10px;flex-wrap:wrap}.bar-row input{flex:1;min-width:200px}
+.tabs{display:flex;gap:12px;flex-wrap:wrap;margin:20px 0}
+.tab{background:#fff}.tab.on{background:var(--ink);color:var(--lime)}
+.stats{display:flex;flex-wrap:wrap;gap:14px;margin:20px 0}.stat{flex:1 1 150px}
+.stat{background:#fff;border:3px solid var(--ink);box-shadow:4px 4px 0 var(--ink);padding:10px 14px}
+.stat b{display:block;font-size:26px}.stat span{font-size:12px;text-transform:uppercase;font-weight:700}
+.stat.wide{flex:1 1 100%}
+.chip{display:inline-block;font-style:normal;font-size:12px;font-weight:700;border:2px solid var(--ink);padding:1px 8px;margin:2px 4px 2px 0;background:#eaffb0}
+.chip.dark{background:var(--ink);color:var(--lime)}
+.split{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1.3fr);gap:16px}
+@media(max-width:860px){.split{grid-template-columns:1fr}}
+#hits{max-height:420px;overflow-y:auto;overflow-x:hidden}
+#map{height:400px;border:3px solid var(--ink);background:#e8f5d0}
+.hit{border:3px solid var(--ink);padding:8px;margin-bottom:8px;display:flex;gap:10px;align-items:center;cursor:pointer;background:#fff}
+.hit.on{background:var(--lime)}
+.n{background:var(--ink);color:var(--lime);width:28px;height:28px;display:grid;place-items:center;flex:none;font-weight:700}
+.pin{background:var(--lime);border:3px solid #111;box-shadow:3px 3px 0 #111;display:grid;place-items:center;font-weight:700;color:#111}
+.row{display:flex;justify-content:space-between;gap:10px;flex-wrap:wrap;align-items:center;border:3px solid var(--ink);padding:10px;margin-bottom:10px}
+.txt{white-space:pre-wrap;margin:8px 0}
+.pcard{display:flex;align-items:stretch;padding:0;min-height:190px;overflow:hidden}
+.pbody{flex:1;min-width:0;padding:16px}
+.pside{position:relative;flex:0 0 auto;width:220px;border-left:3px solid var(--ink);background:#eaffb0}
+.pimg{position:absolute;inset:0;width:100%;height:100%;object-fit:cover;display:block}
+@media(max-width:640px){.pcard{flex-direction:column-reverse;min-height:0}.pside{width:100%!important;height:220px;border-left:0;border-bottom:3px solid var(--ink)}}
+.track{height:16px;border:3px solid var(--ink);background:#fff}.track i{display:block;height:100%;background:var(--lime)}
+.lab{display:flex;justify-content:space-between;gap:8px;margin-top:10px}
+.empty{opacity:.75;margin:6px 0}
+#toast{position:fixed;right:16px;bottom:16px;max-width:360px;background:var(--ink);color:var(--lime);padding:12px 16px;border:3px solid var(--lime);transform:translateY(160%);transition:.25s;z-index:9999;font-weight:700}
+#toast.on{transform:none}
+dialog{border:3px solid var(--ink);box-shadow:8px 8px 0 var(--ink);padding:20px;max-width:420px;width:92%}
+dialog::backdrop{background:rgba(212,255,58,.6)}
+dialog label{display:block;margin:10px 0 4px;font-weight:700}dialog input{width:100%}
+.pwrap{margin:0 0 20px;box-shadow:6px 6px 0 var(--ink)}
+.pwrap .pcard{margin:0;box-shadow:none}
+.pwrap.ana{border-radius:0 0 20px 20px}
+.pext{background:var(--ink);color:#fff;padding:18px 22px 16px;border:3px solid var(--ink);border-top:0;border-radius:0 0 20px 20px;outline:2px solid rgba(212,255,58,.55);outline-offset:-10px}
+.ptag{color:var(--lime);font-weight:700;text-transform:uppercase;letter-spacing:.08em;font-size:12px;margin-bottom:10px}
+.pcols{display:flex;gap:28px;flex-wrap:wrap}
+.pext small{display:block;color:#b9c79a;text-transform:uppercase;font-size:11px;letter-spacing:.08em;margin-bottom:4px}
+.k{display:inline-block;background:var(--lime);color:var(--ink);font-weight:700;font-size:13px;padding:2px 10px;margin:2px 6px 2px 0}
+.k.big{font-size:16px;padding:3px 12px}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <div>
+      <h1><span>Competitor</span> Radar</h1>
+      <p class="sub">See what rivals post on Google Maps, then post something better.</p>
+    </div>
+    <div class="bar-row">
+      <select id="proj" title="Your project"></select>
+      <button class="btn" id="newp">+ New project</button>
+    </div>
+  </header>
+
+
+  <div id="welcome" class="card" hidden style="margin-top:24px">
+    <h2>Welcome 👋</h2>
+    <p>Start by creating a project: give it a name and tell us your own business name. Then you can add rivals and see what they post.</p>
+    <button class="btn" onclick="$('#np').showModal()">Create my first project</button>
+  </div>
+
+  <div id="main" hidden>
+    <div class="stats" id="stats"></div>
+    <div class="tabs">
+      <button class="btn tab on" data-t="t1">1 · Find rivals</button>
+      <button class="btn tab" data-t="t2">2 · Read their posts</button>
+      <button class="btn tab" data-t="t3">3 · Spot trends</button>
+      <button class="btn tab" data-t="t4">4 · Get ideas</button>
+    </div>
+
+    <section class="pane" id="t1">
+      <div class="tip">👉 Type the name of a business you compete with. Pick the right one from the list or the map, press Add, then press "Get their posts".</div>
+      <div class="card">
+        <h2>Add a rival</h2>
+        <div class="bar-row"><input id="q" placeholder="e.g. Pizza Hub Andheri"><button class="btn" id="sbtn">Search on Maps</button></div>
+        <div class="split" style="margin-top:14px">
+          <div id="hits"><p class="empty">Search results will show here and as numbered pins on the map.</p></div>
+          <div id="map"></div>
+        </div>
+      </div>
+      <div class="card"><h2>Your rivals</h2><div id="comps"></div></div>
+      <div class="card">
+        <h2>Your focus keywords</h2>
+        <p class="empty">Words that matter to your business (e.g. "family dinner", "rooftop").</p>
+        <div id="kws"></div>
+        <form id="kwf" class="bar-row" style="margin-top:8px"><input id="kw" placeholder="Add a keyword"><button class="btn sm">Add</button></form>
+      </div>
+    </section>
+
+    <section class="pane" id="t2" hidden>
+      <div class="tip">👉 Everything your rivals posted on Google Maps. Press the green button and the AI adds a black analysis panel (topic and keywords) under every post.</div>
+      <div class="card bar-row" style="align-items:center">
+        <button class="btn" id="abtn">Analyze all posts with AI</button>
+        <span id="astat" style="font-weight:700"></span>
+        <span class="empty">This can take a minute or two if the AI is busy. Please keep this page open.</span>
+      </div>
+      <div class="bar-row" style="margin-bottom:16px"><select id="fc"></select><select id="ft"></select></div>
+      <div id="posts"></div>
+    </section>
+
+    <section class="pane" id="t3" hidden>
+      <div class="tip">👉 See which topics your rivals talk about the most. Analyze the posts in step 2 first, then come back here.</div>
+      <div class="card"><h2>What rivals talk about</h2><div id="trends"></div></div>
+    </section>
+
+    <section class="pane" id="t4" hidden>
+      <div class="tip">👉 Choose how many ideas you want and press the button. Each idea has ready-to-post text, a button label and a picture suggestion. The 📅 date is the best day to post it.</div>
+      <div class="card bar-row">
+        <select id="cnt"><option>3</option><option selected>5</option><option>8</option><option>10</option></select>
+        <button class="btn" id="gbtn">Generate post ideas</button>
+      </div>
+      <div id="ideas"></div>
+    </section>
+  </div>
+</div>
+<div id="toast"></div>
+
+<dialog id="np">
+  <form id="npf">
+    <h2>New project</h2>
+    <label for="pn">Project name</label><input id="pn" required placeholder="e.g. Andheri cafes">
+    <label for="pb">Your business name</label><input id="pb" required placeholder="e.g. Brew House">
+    <div class="bar-row" style="margin-top:16px"><button class="btn">Create</button><button type="button" class="btn red" onclick="$('#np').close()">Cancel</button></div>
+  </form>
+</dialog>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.js"></script>
+<script>
+const API = location.protocol === 'file:' ? 'http://127.0.0.1:8000' : '';   // '' = the server that served this page
+const $ = s => document.querySelector(s);
+const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+const sleep = ms => new Promise(r => setTimeout(r, ms));
+const ls = {get: k => { try { return JSON.parse(localStorage.getItem(k) || 'null'); } catch { return null; } },
+            set: (k, v) => { try { localStorage.setItem(k, JSON.stringify(v)); } catch {} }};
+const ST = {never_run:'Not scraped yet', success:'Scraped ✓', captcha_blocked:'Google asked for a puzzle', error:'Failed, try again'};
+let pid = ls.get('pid'), comps = [], posts = [], hits = [], mk = [], map, layer;
+
+function toast(t){const e=$('#toast');e.textContent=t;e.classList.add('on');clearTimeout(toast.t);toast.t=setTimeout(()=>e.classList.remove('on'),4200)}
+async function api(p, o = {}) {
+  let r;
+  try { r = await fetch(API + p, {headers:{'Content-Type':'application/json'}, ...o}); }
+  catch (e) { throw new Error('Cannot reach the server. Is the backend running?'); }
+  if (!r.ok) { let d = ''; try { d = (await r.json()).detail; } catch {} throw new Error(typeof d === 'string' && d ? d : 'Something went wrong (' + r.status + ')'); }
+  return r.json();
+}
+async function run(btn, label, fn) {
+  const t = btn.textContent; btn.disabled = true; btn.classList.add('busy'); btn.textContent = label;
+  try { return await fn(); } catch (e) { toast('⚠ ' + e.message); }
+  finally { btn.disabled = false; btn.classList.remove('busy'); btn.textContent = t; }
+}
+const cn = id => (comps.find(c => c.id === id) || {}).name || 'Rival';
+const chips = s => (s || '').split(',').filter(k => k.trim()).map(k => `<i class="chip">${esc(k.trim())}</i>`).join('');
+
+/* ---------- projects ---------- */
+async function loadProjects() {
+  const ps = await api('/projects/');
+  $('#proj').innerHTML = ps.map(p => `<option value="${p.id}">${esc(p.name)}</option>`).join('') || '<option>No projects yet</option>';
+  $('#main').hidden = !ps.length; $('#welcome').hidden = !!ps.length;
+  if (!ps.length) return;
+  if (!ps.some(p => p.id === pid)) pid = ps[0].id;
+  $('#proj').value = pid; ls.set('pid', pid); refresh();
+}
+$('#proj').onchange = e => { pid = +e.target.value; ls.set('pid', pid); hits = []; refresh(); };
+$('#newp').onclick = () => $('#np').showModal();
+$('#npf').onsubmit = async e => {
+  e.preventDefault();
+  try {
+    const p = await api('/projects/', {method:'POST', body:JSON.stringify({name:$('#pn').value.trim(), target_business:$('#pb').value.trim()})});
+    $('#np').close(); pid = p.id; e.target.reset(); toast('Project created ✓'); loadProjects();
+  } catch (er) { toast('⚠ ' + er.message); }
+};
+
+async function refresh() {
+  try {
+    comps = await api(`/projects/${pid}/competitors/`);
+    posts = await api(`/projects/${pid}/posts/`);
+    drawComps(); fillFilters(); drawPosts(); await dash(); await loadKw(); await loadIdeas().catch(() => {});
+  } catch (e) { toast('⚠ ' + e.message); }
+}
+async function dash() {
+  const d = await api(`/projects/${pid}/dashboard`);
+  $('#stats').innerHTML = [['Rivals', d.competitor_count], ['Posts collected', d.total_posts], ['Ideas made', d.generated_idea_count],
+    ['Last scrape', d.last_scrape ? new Date(d.last_scrape).toLocaleDateString() : 'never']]
+    .map(([a, b]) => `<div class="stat"><b>${esc(b)}</b><span>${a}</span></div>`).join('') +
+    (d.top_topics.length ? `<div class="stat wide"><span>Hot topics right now</span><br>${d.top_topics.map(t => `<i class="chip dark">${esc(t[0])} · ${t[1]}</i>`).join('')}</div>` : '');
+}
+
+/* ---------- tabs ---------- */
+function show(t) {
+  document.querySelectorAll('.tab').forEach(b => b.classList.toggle('on', b.dataset.t === t));
+  document.querySelectorAll('section.pane').forEach(s => s.hidden = s.id !== t);
+  if (t === 't1') { initMap(); setTimeout(() => map.invalidateSize(), 60); }
+  if (t === 't2') drawPosts();
+  if (t === 't3') trends().catch(() => {});
+  if (t === 't4') loadIdeas().catch(e => toast('⚠ ' + e.message));
+}
+document.querySelectorAll('.tab').forEach(b => b.onclick = () => show(b.dataset.t));
+
+/* ---------- search + map ---------- */
+function coords(u) {
+  const m = u.match(/!3d(-?\d+\.\d+)!4d(-?\d+\.\d+)/) || u.match(/@(-?\d+\.\d+),(-?\d+\.\d+)/);
+  return m ? [+m[1], +m[2]] : null;
+}
+const MAP_KEY = 'bmQgmz1GfGPIHPr7Dm0q';   // MapTiler key
+const MUMBAI = [19.076, 72.8777];
+function initMap() {
+  if (map) return;
+  map = L.map('map').setView(MUMBAI, 11);
+  L.tileLayer(`https://api.maptiler.com/maps/streets-v2/{z}/{x}/{y}.png?key=${MAP_KEY}`,
+    {tileSize:512, zoomOffset:-1, minZoom:1, maxZoom:20, crossOrigin:true, attribution:'© MapTiler © OpenStreetMap contributors'}).addTo(map);
+  layer = L.layerGroup().addTo(map);
+  // start on the visitor's city (from the IP address); Mumbai until that answers
+  fetch('https://ipwho.is/').then(r => r.json()).then(d => {
+    if (d.latitude && !hits.length) map.setView([d.latitude, d.longitude], 11);
+  }).catch(() => {});
+}
+async function search() {
+  const q = $('#q').value.trim();
+  if (!q) return toast('Type a business name first');
+  $('#hits').innerHTML = '<p class="empty">⏳ Searching Google Maps… a browser window may open on your computer. This can take up to a minute. If Google shows a puzzle, solve it there.</p>';
+  try { hits = await api('/competitors/search/?q=' + encodeURIComponent(q)); }
+  catch (e) { $('#hits').innerHTML = `<p class="empty">⚠ ${esc(e.message)}</p>`; throw e; }
+  drawHits();
+}
+function drawHits() {
+  initMap(); layer.clearLayers(); mk = []; const pts = [];
+  $('#hits').innerHTML = hits.length ? hits.map((h, i) => {
+    const ll = coords(h.maps_url || '');
+    if (ll) {
+      const m = L.marker(ll, {icon: L.divIcon({className:'pin', html:i + 1, iconSize:[32, 32]})}).addTo(layer)
+        .bindPopup(`<b>${esc(h.name)}</b><br><button class="btn sm" onclick="add(${i})">Add as rival</button>`);
+      m.on('click', () => hl(i)); mk[i] = m; pts.push(ll);
+    }
+    return `<div class="hit" data-i="${i}"><span class="n">${i + 1}</span><div style="flex:1;min-width:0"><b>${esc(h.name)}</b><br><a href="${esc(h.maps_url)}" target="_blank" rel="noopener">Open in Google Maps ↗</a>${ll ? '' : ' · <i>no map pin</i>'}</div><button class="btn sm" data-add="${i}">Add</button></div>`;
+  }).join('') : '<p class="empty">Nothing found. Try another spelling, or add the area (e.g. "Cafe Leopold Colaba").</p>';
+  if (pts.length) map.fitBounds(pts, {padding:[40, 40], maxZoom:16});
+  setTimeout(() => map.invalidateSize(), 100);
+}
+function hl(i) {
+  document.querySelectorAll('.hit').forEach(e => e.classList.toggle('on', +e.dataset.i === i));
+  const m = mk[i]; if (m) { map.flyTo(m.getLatLng(), Math.max(map.getZoom(), 15)); m.openPopup(); }
+}
+$('#hits').onclick = e => {
+  const b = e.target.closest('[data-add]'); if (b) return add(+b.dataset.add);
+  if (e.target.closest('a')) return;
+  const h = e.target.closest('.hit'); if (h) hl(+h.dataset.i);
+};
+async function add(i) {
+  const h = hits[i];
+  try {
+    await api(`/projects/${pid}/competitors/`, {method:'POST', body:JSON.stringify({name:h.name, maps_url:h.maps_url, place_id:h.place_id})});
+    toast(`Added ${h.name} ✓ Now press "Get their posts"`); map.closePopup(); refresh();
+  } catch (e) { toast('⚠ ' + e.message); }
+}
+$('#sbtn').onclick = () => run($('#sbtn'), 'Searching…', search);
+$('#q').onkeydown = e => { if (e.key === 'Enter') $('#sbtn').click(); };
+
+/* ---------- rivals + scraping ---------- */
+function drawComps() {
+  const n = {}; posts.forEach(p => n[p.competitor_id] = (n[p.competitor_id] || 0) + 1);
+  $('#comps').innerHTML = comps.length ? comps.map(c => `<div class="row"><div><b>${esc(c.name)}</b><br>
+    <i class="chip ${c.last_scrape_status === 'success' ? 'dark' : ''}">${esc(ST[c.last_scrape_status] || c.last_scrape_status)}</i><i class="chip">${n[c.id] || 0} posts</i></div>
+    <div><button class="btn sm" data-a="scrape" data-id="${c.id}">Get their posts</button> <button class="btn sm red" data-a="del" data-id="${c.id}">Remove</button></div></div>`).join('')
+    : '<p class="empty">No rivals yet. Search above and press "Add".</p>';
+}
+$('#comps').onclick = e => {
+  const b = e.target.closest('button'); if (!b) return;
+  const c = comps.find(x => x.id == b.dataset.id);
+  if (b.dataset.a === 'scrape') run(b, 'Collecting… (a few minutes)', () => scrape(c));
+  if (b.dataset.a === 'del' && confirm('Remove ' + c.name + ' and all its collected posts?')) run(b, 'Removing…', async () => { await api('/competitors/' + c.id, {method:'DELETE'}); refresh(); });
+};
+async function scrape(c) {
+  const seen = (await api(`/competitors/${c.id}/logs/`)).map(l => l.id);
+  await api(`/competitors/${c.id}/scrape/`, {method:'POST'});
+  toast('Started. Google Maps is being read in the background…');
+  for (let i = 0; i < 100; i++) {
+    await sleep(4000);
+    const n = (await api(`/competitors/${c.id}/logs/`)).find(l => !seen.includes(l.id));
+    if (n && n.status !== 'running') {
+      toast(n.status === 'success' ? `Done: ${n.new_posts} new posts (${n.duplicates_skipped} already saved)` : '⚠ ' + (n.error_message || ST[n.status]));
+      break;
+    }
+  }
+  refresh();
+}
+
+/* ---------- keywords ---------- */
+async function loadKw() {
+  const k = await api(`/projects/${pid}/keywords/`);
+  $('#kws').innerHTML = k.map(x => `<i class="chip dark">${esc(x.text)}</i>`).join('') || '<span class="empty">None yet</span>';
+}
+$('#kwf').onsubmit = async e => {
+  e.preventDefault(); const t = $('#kw').value.trim(); if (!t) return;
+  try { await api(`/projects/${pid}/keywords/`, {method:'POST', body:JSON.stringify({text:t})}); $('#kw').value = ''; loadKw(); }
+  catch (er) { toast('⚠ ' + er.message); }
+};
+
+/* ---------- posts ---------- */
+function fillFilters() {
+  const fc = $('#fc'), ft = $('#ft'), a = fc.value, b = ft.value;
+  fc.innerHTML = '<option value="">All rivals</option>' + comps.map(c => `<option value="${c.id}">${esc(c.name)}</option>`).join('');
+  ft.innerHTML = '<option value="">All topics</option>' + [...new Set(posts.map(p => p.topic).filter(Boolean))].map(t => `<option>${esc(t)}</option>`).join('');
+  fc.value = a; ft.value = b;
+}
+function fitImg(img) {
+  const side = img.parentElement, card = side.closest('.pcard');
+  if (!img.naturalHeight || innerWidth <= 640) return;
+  const w = card.offsetHeight * img.naturalWidth / img.naturalHeight;
+  side.style.width = Math.round(Math.min(Math.max(w, 140), card.offsetWidth * 0.45)) + 'px';
+}
+function postLink(p) {
+  const u = p.post_url || (comps.find(c => c.id === p.competitor_id) || {}).maps_url;
+  return u ? `<p style="margin:10px 0 0"><a href="${esc(u)}" target="_blank" rel="noopener">${p.post_url ? 'Open this post on Google Maps ↗' : "Check on the rival's Google Maps page ↗"}</a></p>` : '';
+}
+function drawPosts() {
+  const c = $('#fc').value, t = $('#ft').value;
+  $('#astat').textContent = posts.length ? `${posts.filter(p => p.topic).length} of ${posts.length} posts analyzed` : '';
+  const L = posts.filter(p => (!c || p.competitor_id == c) && (!t || p.topic === t));
+  $('#posts').innerHTML = L.length ? L.slice(0, 80).map(p => {
+    const kw = (p.keywords_detected || '').split(',').filter(k => k.trim()).map(k => `<span class="k">${esc(k.trim())}</span>`).join('');
+    const img = p.image_url ? `<a class="pside" href="${esc(p.image_url)}" target="_blank" rel="noopener"><img class="pimg" src="${esc(p.image_url)}" alt="Post image" loading="lazy" referrerpolicy="no-referrer" onload="fitImg(this)" onerror="this.parentElement.remove()"></a>` : '';
+    const ext = p.topic ? `<div class="pext"><div class="ptag">AI analysis</div><div class="pcols"><div><small>Topic</small><span class="k big">${esc(p.topic)}</span></div><div><small>Keywords</small>${kw || '<span class="k">none</span>'}</div></div></div>` : '';
+    return `<div class="pwrap${p.topic ? ' ana' : ''}"><article class="card pcard"><div class="pbody"><div><b>${esc(cn(p.competitor_id))}</b>${p.cta_text ? ` <i class="chip">Button: ${esc(p.cta_text)}</i>` : ''}</div><p class="txt">${esc(p.content)}</p>${postLink(p)}</div>${img}</article>${ext}</div>`;
+  }).join('') + (L.length > 80 ? `<p class="empty">Showing 80 of ${L.length}. Use the filters to narrow down.</p>` : '')
+    : '<p class="empty">No posts to show yet. Add a rival and press "Get their posts" first.</p>';
+}
+$('#fc').onchange = $('#ft').onchange = drawPosts;
+
+/* ---------- analysis + trends ---------- */
+async function trends() {
+  const t = await api(`/projects/${pid}/trends/`);
+  $('#trends').innerHTML = t.length ? t.map(x => `<div class="lab"><b>${esc(x.topic)}</b><span>${x.competitors_using} of ${x.total_competitors} rivals</span></div><div class="track"><i style="width:${Math.max(x.occurrence_pct, 4)}%"></i></div>`).join('')
+    : '<p class="empty">No trends yet. Go to "Read their posts" and press "Analyze all posts with AI" first.</p>';
+}
+$('#abtn').onclick = () => run($('#abtn'), 'AI is reading… (up to 2 min)', async () => {
+  const r = await api(`/projects/${pid}/analyze/`, {method:'POST'});
+  toast(`Done: ${r.analyzed_posts} posts analyzed ✓`); await refresh(); await trends();
+});
+
+/* ---------- ideas (saved in the database) ---------- */
+let ideas = [];
+async function loadIdeas() {
+  ideas = await api(`/projects/${pid}/ideas/`);
+  const d = t => { const m = (t || '').match(/^\[(\d{4}-\d{2}-\d{2})/); return m ? m[1] : '9999'; };
+  ideas.sort((a, b) => d(a.topic).localeCompare(d(b.topic)) || a.id - b.id);   // timeline: earliest post date first
+  drawIdeas();
+}
+function drawIdeas() {
+  $('#ideas').innerHTML = ideas.length ? ideas.map(i => {
+    const m = (i.topic || '').match(/^\[(.+?)\]\s*(.*)$/), tg = m ? m[1].split('|').map(s => s.trim()) : [];
+    return `<article class="card"><div>${tg.map((s, k) => `<i class="chip ${k === 0 ? 'dark' : ''}">${k === 0 ? '📅 ' : ''}${esc(s)}</i>`).join('')}</div>
+      <h3>${esc(m ? m[2] : i.topic)}</h3><p class="txt">${esc(i.draft_copy)}</p>
+      <p>🔘 <b>Button:</b> ${esc(i.cta_suggested)}<br>🖼 <b>Picture idea:</b> ${esc(i.image_concept)}</p>
+      <div>${chips(i.keywords)}</div>
+      <div style="margin-top:8px"><button class="btn sm" data-copy="${i.id}">Copy text</button> <button class="btn sm red" data-del="${i.id}">Delete</button></div></article>`;
+  }).join('') : '<p class="empty">No ideas yet. Press the green button above.</p>';
+}
+$('#ideas').onclick = e => {
+  const c = e.target.closest('[data-copy]'), x = e.target.closest('[data-del]');
+  if (c) {
+    const i = ideas.find(v => v.id == c.dataset.copy);
+    navigator.clipboard.writeText(i.draft_copy).then(() => toast('Copied ✓')).catch(() => toast('Select the text and copy it by hand'));
+  }
+  if (x && confirm('Delete this idea for good?')) run(x, 'Deleting…', async () => {
+    await api('/ideas/' + x.dataset.del, {method:'DELETE'});
+    ideas = ideas.filter(v => v.id != x.dataset.del); drawIdeas(); dash(); toast('Idea deleted');
+  });
+};
+$('#gbtn').onclick = () => run($('#gbtn'), 'Thinking… (up to 2 min)', async () => {
+  await api(`/projects/${pid}/generate-ideas/`, {method:'POST', body:JSON.stringify({count:+$('#cnt').value})});
+  await loadIdeas(); dash(); toast('New ideas ready ✓');
+});
+
+/* ---------- start ---------- */
+show('t1');
+loadProjects().catch(() => {});
+</script>
+</body>
+</html>
