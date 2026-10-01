@@ -10,9 +10,10 @@ from scraper import run_competitor_scrape, search_place_candidates, CaptchaBlock
 from ai_providers import analyze_posts, generate_ideas, AIProviderError  # simple wrapper module, see below
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
+from pathlib import Path
 
-
-sqlite_url = "sqlite:///database.db"
+BASE_DIR = Path(__file__).resolve().parent
+sqlite_url = f"sqlite:///{BASE_DIR / 'database.db'}"
 engine = create_engine(sqlite_url, connect_args={"check_same_thread": False})
 
 
@@ -28,13 +29,21 @@ def get_session():
 app = FastAPI(title="Google Maps Competitor Update Intelligence API")
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])   
 
-@app.on_event("startup")
-@app.get("/", include_in_schema=False)
-def home():
-    return FileResponse("frontend.html")
 
+
+@app.on_event("startup")
 def on_startup():
     create_db_and_tables()
+
+
+@app.get("/", include_in_schema=False)
+def home():
+    return FileResponse(BASE_DIR / "frontend.html")
+
+
+@app.get("/logo.png")
+async def favicon():
+    return FileResponse(BASE_DIR / "logo.png", media_type="image/png")
 
 
 # --- request bodies (simple, no query-param endpoints) ---
@@ -157,24 +166,6 @@ def edit_competitor(competitor_id: int, body: CompetitorIn, session: Session = D
     return competitor
 
 
-@app.delete("/competitors/{competitor_id}")
-def delete_competitor(competitor_id: int, session: Session = Depends(get_session)):
-    competitor = session.get(Competitor, competitor_id)
-    if not competitor:
-        raise HTTPException(status_code=404, detail="Competitor not found")
-    statement_logs = select(ScrapeLog).where(ScrapeLog.competitor_id == competitor_id)
-    logs = session.exec(statement_logs).all()
-    for log in logs:
-        session.delete(log)
-    statement_posts = select(ScrapedPost).where(ScrapedPost.competitor_id == competitor_id)
-    posts = session.exec(statement_posts).all()
-    for post in posts:
-        session.delete(post)
-    session.delete(competitor)
-    session.commit()
-    return {"status": "deleted"}
-
-
 # --- 3. KEYWORDS ---
 
 @app.post("/projects/{project_id}/keywords/", response_model=Keyword)
@@ -221,8 +212,13 @@ def background_scrape_worker(competitor_id: int):
                 session.add(ScrapedPost(
                     competitor_id=competitor_id,
                     content=item["content"],
+                    published_date=item.get("date"),
+                    title=item.get("title"),
+                    validity=item.get("validity"),
+                    post_id=item.get("post_id"),
                     cta_text=item.get("cta_text"),
                     image_url=item.get("image_url"),
+                    video_url=item.get("video_url"),
                     post_url=item.get("post_url"),
                     content_hash=item["content_hash"],
                 ))

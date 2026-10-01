@@ -6,6 +6,7 @@
 <title>Competitor Radar</title>
 <link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@500;700&display=swap" rel="stylesheet">
 <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.css">
+<link rel="icon" type="image/png" sizes="32x32" href="/logo.png">
 <style>
 :root{--ink:#111;--lime:#d4ff3a}
 *{box-sizing:border-box}
@@ -51,6 +52,9 @@ input,select{font:inherit;padding:10px;border:3px solid var(--ink);background:#f
 .pbody{flex:1;min-width:0;padding:16px}
 .pside{position:relative;flex:0 0 auto;width:220px;border-left:3px solid var(--ink);background:#eaffb0}
 .pimg{position:absolute;inset:0;width:100%;height:100%;object-fit:cover;display:block}
+.pside.pvid{width:300px;background:#000}
+.pvideo{position:absolute;inset:0;width:100%;height:100%;object-fit:contain;background:#000;display:block}
+.pvfail{position:absolute;inset:0;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:6px;padding:12px;text-align:center;background:#eaffb0;font-weight:700}
 @media(max-width:640px){.pcard{flex-direction:column-reverse;min-height:0}.pside{width:100%!important;height:220px;border-left:0;border-bottom:3px solid var(--ink)}}
 .track{height:16px;border:3px solid var(--ink);background:#fff}.track i{display:block;height:100%;background:var(--lime)}
 .lab{display:flex;justify-content:space-between;gap:8px;margin-top:10px}
@@ -69,6 +73,8 @@ dialog label{display:block;margin:10px 0 4px;font-weight:700}dialog input{width:
 .pext small{display:block;color:#b9c79a;text-transform:uppercase;font-size:11px;letter-spacing:.08em;margin-bottom:4px}
 .k{display:inline-block;background:var(--lime);color:var(--ink);font-weight:700;font-size:13px;padding:2px 10px;margin:2px 6px 2px 0}
 .k.big{font-size:16px;padding:3px 12px}
+
+/* live "system is working" panel */#work{position:fixed;left:16px;bottom:16px;width:min(340px,calc(100vw - 32px));display:flex;flex-direction:column;gap:10px;z-index:9998}.wk{background:#fff;border:3px solid var(--ink);box-shadow:5px 5px 0 var(--ink);padding:10px 12px}.wk-top{display:flex;align-items:center;gap:8px}.wk-top b{flex:1;min-width:0;font-size:13px;text-transform:uppercase}.wk-time{font-size:12px;font-weight:700;background:var(--ink);color:var(--lime);padding:0 6px}.wk-spin{flex:none;width:14px;height:14px;border:3px solid var(--ink);border-top-color:transparent;border-radius:50%;animation:sp .7s linear infinite}.wk-hint{font-size:13px;margin:6px 0 8px}.wk-bar{position:relative;height:10px;border:2px solid var(--ink);overflow:hidden}.wk-bar i{position:absolute;top:0;bottom:0;width:35%;background:var(--lime);border-right:2px solid var(--ink);animation:slide 1.2s ease-in-out infinite}@keyframes slide{from{left:-35%}to{left:100%}}.chip.live{background:var(--lime);animation:pulse 1s ease-in-out infinite}@keyframes pulse{50%{opacity:.5}}@media(max-width:700px){#toast{bottom:auto;top:16px;transform:translateY(-160%)}#toast.on{transform:none}}
 </style>
 </head>
 <body>
@@ -146,6 +152,7 @@ dialog label{display:block;margin:10px 0 4px;font-weight:700}dialog input{width:
   </div>
 </div>
 <div id="toast"></div>
+<div id="work" hidden></div>
 
 <dialog id="np">
   <form id="npf">
@@ -164,10 +171,14 @@ const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt
 const sleep = ms => new Promise(r => setTimeout(r, ms));
 const ls = {get: k => { try { return JSON.parse(localStorage.getItem(k) || 'null'); } catch { return null; } },
             set: (k, v) => { try { localStorage.setItem(k, JSON.stringify(v)); } catch {} }};
-const ST = {never_run:'Not scraped yet', success:'Scraped ✓', captcha_blocked:'Google asked for a puzzle', error:'Failed, try again'};
+const ST = {never_run:'Not scraped yet', success:'Scraped ✓', captcha_blocked:'Google blocked this run, try again later', error:'Failed, try again'};
+const busyComps = new Set();
 let pid = ls.get('pid'), comps = [], posts = [], hits = [], mk = [], map, layer;
 
 function toast(t){const e=$('#toast');e.textContent=t;e.classList.add('on');clearTimeout(toast.t);toast.t=setTimeout(()=>e.classList.remove('on'),4200)}
+
+/* ---------- live "system is working" panel ---------- */const Work = {  tasks: new Map(), n: 0, timer: null,  start(title, hint) {    const id = ++this.n;    this.tasks.set(id, {title, hint, t0: Date.now()});    this.render();    if (!this.timer) this.timer = setInterval(() => this.render(), 1000);    return id;  },  end(id) {    this.tasks.delete(id);    if (!this.tasks.size) { clearInterval(this.timer); this.timer = null; }    this.render();  },  render() {    const box = $('#work'); box.hidden = !this.tasks.size;    this.tasks.forEach((t, id) => {      let el = box.querySelector(`[data-w="${id}"]`);      if (!el) {        el = document.createElement('div'); el.className = 'wk'; el.dataset.w = id;        el.innerHTML = `<div class="wk-top"><span class="wk-spin"></span><b>${esc(t.title)}</b><span class="wk-time"></span></div><div class="wk-hint"></div><div class="wk-bar"><i></i></div>`;        box.appendChild(el);      }      const s = Math.floor((Date.now() - t.t0) / 1000);      el.querySelector('.wk-time').textContent = Math.floor(s / 60) + ':' + String(s % 60).padStart(2, '0');      el.querySelector('.wk-hint').textContent = t.hint + (s > 60 ? ' Still working, bigger jobs take a few minutes.' : '');    });    box.querySelectorAll('[data-w]').forEach(el => { if (!this.tasks.has(+el.dataset.w)) el.remove(); });  }};window.addEventListener('beforeunload', e => { if (Work.tasks.size) { e.preventDefault(); e.returnValue = ''; } });
+
 async function api(p, o = {}) {
   let r;
   try { r = await fetch(API + p, {headers:{'Content-Type':'application/json'}, ...o}); }
@@ -175,10 +186,11 @@ async function api(p, o = {}) {
   if (!r.ok) { let d = ''; try { d = (await r.json()).detail; } catch {} throw new Error(typeof d === 'string' && d ? d : 'Something went wrong (' + r.status + ')'); }
   return r.json();
 }
-async function run(btn, label, fn) {
-  const t = btn.textContent; btn.disabled = true; btn.classList.add('busy'); btn.textContent = label;
+async function run(btn, label, fn, work) {   // work = optional [title, hint] -> shows the live panel
+  const t = btn.textContent, w = work ? Work.start(work[0], work[1]) : null;
+  btn.disabled = true; btn.classList.add('busy'); btn.textContent = label;
   try { return await fn(); } catch (e) { toast('⚠ ' + e.message); }
-  finally { btn.disabled = false; btn.classList.remove('busy'); btn.textContent = t; }
+  finally { if (w) Work.end(w); btn.disabled = false; btn.classList.remove('busy'); btn.textContent = t; }
 }
 const cn = id => (comps.find(c => c.id === id) || {}).name || 'Rival';
 const chips = s => (s || '').split(',').filter(k => k.trim()).map(k => `<i class="chip">${esc(k.trim())}</i>`).join('');
@@ -214,7 +226,7 @@ async function dash() {
   $('#stats').innerHTML = [['Rivals', d.competitor_count], ['Posts collected', d.total_posts], ['Ideas made', d.generated_idea_count],
     ['Last scrape', d.last_scrape ? new Date(d.last_scrape).toLocaleDateString() : 'never']]
     .map(([a, b]) => `<div class="stat"><b>${esc(b)}</b><span>${a}</span></div>`).join('') +
-    (d.top_topics.length ? `<div class="stat wide"><span>Hot topics right now</span><br>${d.top_topics.map(t => `<i class="chip dark">${esc(t[0])} · ${t[1]}</i>`).join('')}</div>` : '');
+    (d.top_topics.length ? `<div class="stat wide"><span>Hot topics right now</span><br>${d.top_topics.map(t => `<i class="chip dark">${esc(t[0])} ·${t[1]}</i>`).join('')}</div>` : '');
 }
 
 /* ---------- tabs ---------- */
@@ -249,7 +261,7 @@ function initMap() {
 async function search() {
   const q = $('#q').value.trim();
   if (!q) return toast('Type a business name first');
-  $('#hits').innerHTML = '<p class="empty">⏳ Searching Google Maps… a browser window may open on your computer. This can take up to a minute. If Google shows a puzzle, solve it there.</p>';
+  $('#hits').innerHTML = '<p class="empty">⏳ Searching Google Maps… this can take up to a minute.</p>';
   try { hits = await api('/competitors/search/?q=' + encodeURIComponent(q)); }
   catch (e) { $('#hits').innerHTML = `<p class="empty">⚠ ${esc(e.message)}</p>`; throw e; }
   drawHits();
@@ -284,36 +296,42 @@ async function add(i) {
     toast(`Added ${h.name} ✓ Now press "Get their posts"`); map.closePopup(); refresh();
   } catch (e) { toast('⚠ ' + e.message); }
 }
-$('#sbtn').onclick = () => run($('#sbtn'), 'Searching…', search);
+$('#sbtn').onclick = () => run($('#sbtn'), 'Searching…', search, ['Searching Google Maps', 'A hidden browser is looking this up for you.']);
 $('#q').onkeydown = e => { if (e.key === 'Enter') $('#sbtn').click(); };
 
 /* ---------- rivals + scraping ---------- */
 function drawComps() {
   const n = {}; posts.forEach(p => n[p.competitor_id] = (n[p.competitor_id] || 0) + 1);
-  $('#comps').innerHTML = comps.length ? comps.map(c => `<div class="row"><div><b>${esc(c.name)}</b><br>
-    <i class="chip ${c.last_scrape_status === 'success' ? 'dark' : ''}">${esc(ST[c.last_scrape_status] || c.last_scrape_status)}</i><i class="chip">${n[c.id] || 0} posts</i></div>
-    <div><button class="btn sm" data-a="scrape" data-id="${c.id}">Get their posts</button> <button class="btn sm red" data-a="del" data-id="${c.id}">Remove</button></div></div>`).join('')
-    : '<p class="empty">No rivals yet. Search above and press "Add".</p>';
+  $('#comps').innerHTML = comps.length ? comps.map(c => {
+    const on = busyComps.has(c.id);
+    return `<div class="row"><div><b>${esc(c.name)}</b><br>
+    ${on ? '<i class="chip live">⏳ Collecting posts…</i>' : `<i class="chip ${c.last_scrape_status === 'success' ? 'dark' : ''}">${esc(ST[c.last_scrape_status] || c.last_scrape_status)}</i>`}<i class="chip">${n[c.id] || 0} posts</i></div>
+    <div><button class="btn sm${on ? ' busy' : ''}" data-a="scrape" data-id="${c.id}" ${on ? 'disabled' : ''}>${on ? 'Collecting…' : 'Get their posts'}</button> <button class="btn sm red" data-a="del" data-id="${c.id}" ${on ? 'disabled' : ''}>Remove</button></div></div>`;
+  }).join('') : '<p class="empty">No rivals yet. Search above and press "Add".</p>';
 }
 $('#comps').onclick = e => {
   const b = e.target.closest('button'); if (!b) return;
   const c = comps.find(x => x.id == b.dataset.id);
-  if (b.dataset.a === 'scrape') run(b, 'Collecting… (a few minutes)', () => scrape(c));
+  if (b.dataset.a === 'scrape') run(b, 'Collecting…', () => scrape(c), ['Collecting posts: ' + c.name, 'A hidden browser is reading their Google Maps updates. This usually takes a few minutes.']);
   if (b.dataset.a === 'del' && confirm('Remove ' + c.name + ' and all its collected posts?')) run(b, 'Removing…', async () => { await api('/competitors/' + c.id, {method:'DELETE'}); refresh(); });
 };
 async function scrape(c) {
-  const seen = (await api(`/competitors/${c.id}/logs/`)).map(l => l.id);
-  await api(`/competitors/${c.id}/scrape/`, {method:'POST'});
-  toast('Started. Google Maps is being read in the background…');
-  for (let i = 0; i < 100; i++) {
-    await sleep(4000);
-    const n = (await api(`/competitors/${c.id}/logs/`)).find(l => !seen.includes(l.id));
-    if (n && n.status !== 'running') {
-      toast(n.status === 'success' ? `Done: ${n.new_posts} new posts (${n.duplicates_skipped} already saved)` : '⚠ ' + (n.error_message || ST[n.status]));
-      break;
+  busyComps.add(c.id); drawComps();
+  try {
+    const seen = (await api(`/competitors/${c.id}/logs/`)).map(l => l.id);
+    await api(`/competitors/${c.id}/scrape/`, {method:'POST'});
+    toast('Started. A hidden browser is reading Google Maps. Keep this page open.');
+    let finished = false;
+    for (let i = 0; i < 180; i++) {   // ~12 min
+      await sleep(4000);
+      const n = (await api(`/competitors/${c.id}/logs/`)).find(l => !seen.includes(l.id));
+      if (n && n.status !== 'running') {
+        toast(n.status === 'success' ? `Done: ${n.new_posts} new posts (${n.duplicates_skipped} already saved)` : '⚠ ' + (n.error_message || ST[n.status]));
+        finished = true; break;
+      }
     }
-  }
-  refresh();
+    if (!finished) toast('Still running in the background. Check back in a few minutes.');
+  } finally { busyComps.delete(c.id); refresh(); }
 }
 
 /* ---------- keywords ---------- */
@@ -340,6 +358,11 @@ function fitImg(img) {
   const w = card.offsetHeight * img.naturalWidth / img.naturalHeight;
   side.style.width = Math.round(Math.min(Math.max(w, 140), card.offsetWidth * 0.45)) + 'px';
 }
+function vidFail(v) {
+  const side = v.parentElement, u = v.getAttribute('src');
+  side.classList.remove('pvid');
+  side.innerHTML = `<a class="pvfail" href="${esc(u)}" target="_blank" rel="noopener"><span style="font-size:34px">▶</span><span>Watch video ↗</span></a>`;
+}
 function postLink(p) {
   const u = p.post_url || (comps.find(c => c.id === p.competitor_id) || {}).maps_url;
   return u ? `<p style="margin:10px 0 0"><a href="${esc(u)}" target="_blank" rel="noopener">${p.post_url ? 'Open this post on Google Maps ↗' : "Check on the rival's Google Maps page ↗"}</a></p>` : '';
@@ -351,8 +374,9 @@ function drawPosts() {
   $('#posts').innerHTML = L.length ? L.slice(0, 80).map(p => {
     const kw = (p.keywords_detected || '').split(',').filter(k => k.trim()).map(k => `<span class="k">${esc(k.trim())}</span>`).join('');
     const img = p.image_url ? `<a class="pside" href="${esc(p.image_url)}" target="_blank" rel="noopener"><img class="pimg" src="${esc(p.image_url)}" alt="Post image" loading="lazy" referrerpolicy="no-referrer" onload="fitImg(this)" onerror="this.parentElement.remove()"></a>` : '';
+    const vid = !p.image_url && p.video_url ? `<div class="pside pvid"><video class="pvideo" src="${esc(p.video_url)}" controls playsinline preload="metadata" referrerpolicy="no-referrer" onerror="vidFail(this)"></video></div>` : '';
     const ext = p.topic ? `<div class="pext"><div class="ptag">AI analysis</div><div class="pcols"><div><small>Topic</small><span class="k big">${esc(p.topic)}</span></div><div><small>Keywords</small>${kw || '<span class="k">none</span>'}</div></div></div>` : '';
-    return `<div class="pwrap${p.topic ? ' ana' : ''}"><article class="card pcard"><div class="pbody"><div><b>${esc(cn(p.competitor_id))}</b>${p.cta_text ? ` <i class="chip">Button: ${esc(p.cta_text)}</i>` : ''}</div><p class="txt">${esc(p.content)}</p>${postLink(p)}</div>${img}</article>${ext}</div>`;
+    return `<div class="pwrap${p.topic ? ' ana' : ''}"><article class="card pcard"><div class="pbody"><div><b>${esc(cn(p.competitor_id))}</b>${p.cta_text ? ` <i class="chip">Button: ${esc(p.cta_text)}</i>` : ''}</div><p class="txt">${esc(p.content)}</p>${postLink(p)}</div>${img}${vid}</article>${ext}</div>`;
   }).join('') + (L.length > 80 ? `<p class="empty">Showing 80 of ${L.length}. Use the filters to narrow down.</p>` : '')
     : '<p class="empty">No posts to show yet. Add a rival and press "Get their posts" first.</p>';
 }
@@ -367,7 +391,7 @@ async function trends() {
 $('#abtn').onclick = () => run($('#abtn'), 'AI is reading… (up to 2 min)', async () => {
   const r = await api(`/projects/${pid}/analyze/`, {method:'POST'});
   toast(`Done: ${r.analyzed_posts} posts analyzed ✓`); await refresh(); await trends();
-});
+}, ['AI is analyzing posts', 'Reading every post and tagging its topic and keywords.']);
 
 /* ---------- ideas (saved in the database) ---------- */
 let ideas = [];
@@ -401,7 +425,7 @@ $('#ideas').onclick = e => {
 $('#gbtn').onclick = () => run($('#gbtn'), 'Thinking… (up to 2 min)', async () => {
   await api(`/projects/${pid}/generate-ideas/`, {method:'POST', body:JSON.stringify({count:+$('#cnt').value})});
   await loadIdeas(); dash(); toast('New ideas ready ✓');
-});
+}, ['AI is writing post ideas', 'Studying rival posts and drafting your ideas.']);
 
 /* ---------- start ---------- */
 show('t1');

@@ -13,20 +13,65 @@ from google.genai import types
 
 load_dotenv()
 
-client = genai.Client()
-# Models are tried in this order. When one is overloaded (503) we move on to the next one
-# (with a single model, it just retries that one).
-# Override in .env with GEMINI_MODELS="model-a,model-b,model-c".
-DEFAULT_MODELS = [
-    "gemini-3.5-flash",  # the model that answers reliably on this key
-    # backups can be added here or via GEMINI_MODELS in .env, e.g. "gemini-3.1-flash-lite"
+# ---------------------------------------------------------------------------
+# Gemini client / model selection
+#
+# The old version hard-coded one model and treated every 503 as "model busy".
+# A 503 can also be a temporary capacity/routing problem even when the model
+# is valid for the API key.  We therefore:
+#   1. honour explicit GEMINI_MODELS/GEMINI_MODEL settings;
+#   2. discover usable generateContent models from the API when no list is set;
+#   3. rotate to another model immediately on 503/429/5xx;
+#   4. temporarily cool down a model that just failed;
+#   5. validate the response before returning it.
+# ---------------------------------------------------------------------------
+
+_API_KEY = os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY")
+client = genai.Client(api_key=_API_KEY) if _API_KEY else genai.Client()
+
+# Optional explicit model order:
+# GEMINI_MODELS="gemini-2.5-flash,gemini-2.0-flash"
+# or:
+# GEMINI_MODEL="gemini-2.5-flash"
+#
+# If neither is supplied, the code discovers models available to this key.
+EXPLICIT_MODELS = [
+    m.strip()
+    for m in (
+        os.getenv("GEMINI_MODELS")
+        or os.getenv("GEMINI_MODEL")
+        or ""
+    ).split(",")
+    if m.strip()
 ]
-MODELS = [m.strip() for m in os.getenv("GEMINI_MODELS", ",".join(DEFAULT_MODELS)).split(",") if m.strip()]
 
-ATTEMPTS_PER_MODEL = int(os.getenv("AI_MAX_RETRIES", "2"))  # tries on ONE model before moving to the next
-RETRYABLE = ("503", "UNAVAILABLE", "429", "RESOURCE_EXHAUSTED", "500", "504", "DEADLINE_EXCEEDED")
+# Models are cached for this process. A failed model is temporarily skipped.
+_MODEL_CACHE: Optional[List[str]] = None
+_MODEL_COOLDOWN_UNTIL: Dict[str, float] = {}
 
-MAX_POST_CHARS = 600  # long posts are trimmed when analyzing
+MODEL_DISCOVERY_TTL = int(os.getenv("GEMINI_MODEL_CACHE_SECONDS", "900"))
+MODEL_COOLDOWN_503 = int(os.getenv("GEMINI_503_COOLDOWN_SECONDS", "30"))
+MODEL_COOLDOWN_429 = int(os.getenv("GEMINI_429_COOLDOWN_SECONDS", "60"))
+
+# Number of attempts across the model pool, not repeated attempts on one
+# model. This avoids getting stuck on a model returning 503.
+MAX_MODEL_ATTEMPTS = max(1, int(os.getenv("AI_MAX_RETRIES", "4")))
+
+RETRYABLE_STATUS = (
+    "429",
+    "500",
+    "502",
+    "503",
+    "504",
+    "RESOURCE_EXHAUSTED",
+    "UNAVAILABLE",
+    "INTERNAL",
+    "DEADLINE_EXCEEDED",
+    "SERVICE_UNAVAILABLE",
+)
+
+MAX_POST_CHARS = 600
+
 
 # ---- idea pipeline settings ----
 TREND_SHARE = 0.6              # 60% of ideas remix trending topics, the rest are fresh
@@ -84,50 +129,338 @@ class IdeasResult(BaseModel):
 # One simple AI call with retries
 # ==========================================
 
+def _model_name(model: Any) -> str:
+    """Return a model name accepted by generate_content()."""
+    name = getattr(model, "name", None) or str(model)
+    return name.removeprefix("models/").strip()
+
+
+def _supports_generate_content(model: Any) -> bool:
+    """
+    The SDK has changed the exact shape of model metadata across releases, so
+    inspect it defensively rather than depending on one SDK version.
+    """
+    actions = getattr(model, "supported_actions", None)
+
+    if actions:
+        try:
+            actions = [str(a).lower() for a in actions]
+            if not any(
+                "generatecontent" in a or "generate_content" in a
+                for a in actions
+            ):
+                return False
+        except Exception:
+            pass
+
+    name = _model_name(model).lower()
+
+    # Never select embedding / tokenizer / pure image or audio models for text.
+    blocked = (
+        "embedding",
+        "text-embedding",
+        "aqa",
+        "imagen",
+        "veo",
+        "tts",
+        "speech",
+    )
+    return not any(part in name for part in blocked)
+
+
+def _model_priority(name: str) -> tuple:
+    """
+    Prefer Flash models for this application because these requests are short
+    and frequent. Discovery still determines what is actually available.
+    """
+    n = name.lower()
+
+    if "flash" in n and "lite" in n:
+        return (0, n)
+    if "flash" in n:
+        return (1, n)
+    if "pro" in n:
+        return (2, n)
+    return (3, n)
+
+
+def _discover_models(force: bool = False) -> List[str]:
+    """
+    Ask Gemini which models this API key can see.
+
+    This is the important difference from the old implementation: we don't
+    assume that a hard-coded model name is usable just because it exists in
+    documentation.
+    """
+    global _MODEL_CACHE
+
+    if EXPLICIT_MODELS:
+        return [
+            m.removeprefix("models/").strip()
+            for m in EXPLICIT_MODELS
+            if m.strip()
+        ]
+
+    now = time.time()
+
+    if (
+        not force
+        and _MODEL_CACHE is not None
+        and _MODEL_CACHE
+        and _MODEL_CACHE[0] != "__DISCOVERY_FAILED__"
+    ):
+        return list(_MODEL_CACHE)
+
+    try:
+        discovered = []
+
+        for model in client.models.list():
+            if not _supports_generate_content(model):
+                continue
+
+            name = _model_name(model)
+
+            if name and name not in discovered:
+                discovered.append(name)
+
+        discovered.sort(key=_model_priority)
+
+        if discovered:
+            _MODEL_CACHE = discovered
+            print(
+                "[AI] discovered models: "
+                + ", ".join(discovered[:12])
+                + (" ..." if len(discovered) > 12 else "")
+            )
+            return list(discovered)
+
+        raise RuntimeError("Gemini API returned no usable generateContent models.")
+
+    except Exception as e:
+        # If discovery itself is unavailable, use a conservative fallback list.
+        # These are only attempted; a 404 simply causes the next candidate.
+        print(f"[AI] model discovery failed: {str(e)[:220]}")
+
+        fallback = [
+            "gemini-2.5-flash",
+            "gemini-2.0-flash",
+            "gemini-2.0-flash-lite",
+            "gemini-1.5-flash",
+        ]
+
+        _MODEL_CACHE = fallback
+        return list(fallback)
+
+
+def _is_retryable_error(message: str) -> bool:
+    upper = message.upper()
+    return any(code in upper for code in RETRYABLE_STATUS)
+
+
+def _status_from_error(message: str) -> Optional[int]:
+    match = re.search(r"\b(4\d\d|5\d\d)\b", message)
+    return int(match.group(1)) if match else None
+
+
+def _mark_model_failed(model: str, status: Optional[int]) -> None:
+    now = time.time()
+
+    if status == 429 or "RESOURCE_EXHAUSTED" in model.upper():
+        _MODEL_COOLDOWN_UNTIL[model] = now + MODEL_COOLDOWN_429
+    elif status == 503 or status in (500, 502, 504):
+        _MODEL_COOLDOWN_UNTIL[model] = now + MODEL_COOLDOWN_503
+
+
+def _available_models(models: List[str]) -> List[str]:
+    now = time.time()
+    return [
+        m for m in models
+        if _MODEL_COOLDOWN_UNTIL.get(m, 0) <= now
+    ]
+
+
+def _parse_response(response: Any, schema):
+    """
+    Validate the structured response. Supports both Pydantic's model
+    validation and the SDK's parsed response when available.
+    """
+    parsed = getattr(response, "parsed", None)
+
+    if parsed is not None:
+        if isinstance(parsed, schema):
+            return parsed
+
+        try:
+            return schema.model_validate(parsed)
+        except Exception:
+            pass
+
+    raw = getattr(response, "text", None)
+
+    if not raw:
+        raise ValueError("Gemini returned an empty response.")
+
+    return schema.model_validate_json(raw)
+
+
 def _call_ai(prompt: str, schema, temperature: float):
     """
-    Sends ONE request at a time and waits for Google's answer before doing anything else.
-    If a model answers "busy", it retries that model once after a pause, then moves on to
-    the next model in MODELS. Raises AIProviderError only when no model could answer.
+    Send one request at a time, but rotate across usable Gemini models.
+
+    Important:
+      - 503 does NOT mean the model is nonexistent.
+      - 503/429/5xx cause the current model to be cooled down and the next
+        available model is tried.
+      - 404/NOT_FOUND causes the model to be removed from the current pool.
+      - authentication / malformed-request errors are raised immediately.
+      - if discovery was successful, we only try models exposed to this key.
     """
+
     config = types.GenerateContentConfig(
         response_mime_type="application/json",
         response_schema=schema,
         temperature=temperature,
-        automatic_function_calling=types.AutomaticFunctionCallingConfig(disable=True),
+        automatic_function_calling=types.AutomaticFunctionCallingConfig(
+            disable=True
+        ),
     )
 
+    models = _discover_models()
+
+    if not models:
+        raise AIProviderError("No Gemini generateContent models are available.")
+
     last_error = None
-    for model in MODELS:
-        for attempt in range(ATTEMPTS_PER_MODEL):
+    attempted = set()
+
+    for round_number in range(2):
+        candidates = [
+            m for m in _available_models(models)
+            if m not in attempted
+        ]
+
+        if not candidates:
+            # All candidates may have been cooled down after transient errors.
+            # On the second pass, force a fresh discovery in case Google's
+            # available-capacity/model list changed.
+            if round_number == 0:
+                time.sleep(1)
+                continue
+
+            models = _discover_models(force=True)
+            candidates = _available_models(models)
+
+        for model in candidates:
+            attempted.add(model)
+
             started = time.time()
+
             try:
-                print(f"[AI] {model}: sending {schema.__name__} request {attempt + 1}/{ATTEMPTS_PER_MODEL}")
-                response = client.models.generate_content(model=model, contents=prompt, config=config)
-                result = schema.model_validate_json(response.text)
-                print(f"[AI] answered by {model}")
+                print(
+                    f"[AI] {model}: sending {schema.__name__} request "
+                    f"(pool attempt {len(attempted)}/{MAX_MODEL_ATTEMPTS})"
+                )
+
+                response = client.models.generate_content(
+                    model=model,
+                    contents=prompt,
+                    config=config,
+                )
+
+                result = _parse_response(response, schema)
+
+                print(
+                    f"[AI] answered by {model} "
+                    f"in {time.time() - started:.1f}s"
+                )
                 return result
+
             except Exception as e:
                 last_error = e
-                msg = str(e)
-                print(f"[AI] {model} answered with an error after {time.time() - started:.1f}s: "
-                      f"{' '.join(msg.split())[:200]}")
+                msg = " ".join(str(e).split())
+                status = _status_from_error(msg)
 
-                if "404" in msg or "NOT_FOUND" in msg:
-                    print(f"[AI] {model} is not available for this key, skipping it")
-                    break  # next model
-                if not any(code in msg for code in RETRYABLE):
-                    raise AIProviderError(msg) from e  # real error (auth, bad request...), no point trying others
+                print(
+                    f"[AI] {model} failed after "
+                    f"{time.time() - started:.1f}s: {msg[:260]}"
+                )
 
-                if attempt < ATTEMPTS_PER_MODEL - 1:
-                    wait = min(5 * 2 ** attempt, 45) + random.uniform(0, 2)
-                    print(f"[AI] {model} is busy, retrying it in {wait:.0f}s")
-                    time.sleep(wait)
-                else:
-                    print(f"[AI] {model} is busy, trying the next model...")
+                upper = msg.upper()
 
-    raise AIProviderError(f"No model could answer. Last error: {last_error}")
+                # Model genuinely unavailable for this key/version.
+                if (
+                    status == 404
+                    or "NOT_FOUND" in upper
+                    or "MODEL_NOT_FOUND" in upper
+                ):
+                    print(
+                        f"[AI] {model} is not available for this API key; "
+                        f"trying another discovered model."
+                    )
+                    continue
 
+                # Temporary capacity/rate/service errors:
+                # DO NOT keep hammering the same model.
+                if _is_retryable_error(msg):
+                    _mark_model_failed(model, status)
+
+                    if status == 429 or "RESOURCE_EXHAUSTED" in upper:
+                        print(
+                            f"[AI] {model} hit a rate/quota limit; "
+                            f"temporarily skipping it."
+                        )
+                    else:
+                        print(
+                            f"[AI] {model} returned a temporary "
+                            f"{status or 'service'} error; rotating model."
+                        )
+
+                    if len(attempted) >= MAX_MODEL_ATTEMPTS:
+                        break
+
+                    continue
+
+                # Validation errors can happen because a model does not support
+                # the requested structured-output schema. Try another model.
+                if (
+                    "RESPONSE_SCHEMA" in upper
+                    or "SCHEMA" in upper
+                    or "STRUCTURED OUTPUT" in upper
+                    or isinstance(e, ValueError)
+                ):
+                    print(
+                        f"[AI] {model} could not satisfy the structured "
+                        f"response; trying another model."
+                    )
+                    continue
+
+                # Authentication, invalid API key, malformed request, etc.
+                # Rotating models cannot fix those.
+                raise AIProviderError(msg) from e
+
+            if len(attempted) >= MAX_MODEL_ATTEMPTS:
+                break
+
+        if len(attempted) >= MAX_MODEL_ATTEMPTS:
+            break
+
+    raise AIProviderError(
+        "No Gemini model could answer the request. "
+        f"Last error: {last_error}"
+    )
+
+
+
+def check_gemini_models() -> List[str]:
+    """
+    Optional diagnostic helper. Call this from a shell/test route to see
+    exactly which generateContent models the current API key exposes.
+    """
+    models = _discover_models(force=True)
+    print("[AI] usable generateContent models:")
+    for model in models:
+        print(f"  - {model}")
+    return models
 
 # ==========================================
 # Step 1: analyze ALL posts in ONE call
