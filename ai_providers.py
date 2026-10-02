@@ -2,6 +2,7 @@ import os
 import re
 import json
 import time
+import base64
 import random
 from collections import Counter
 from datetime import date, datetime, timedelta
@@ -10,6 +11,8 @@ from dotenv import load_dotenv
 from pydantic import BaseModel, Field
 from google import genai
 from google.genai import types
+from huggingface_hub import InferenceClient
+from io import BytesIO
 
 load_dotenv()
 
@@ -29,6 +32,35 @@ load_dotenv()
 _API_KEY = os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY")
 client = genai.Client(api_key=_API_KEY) if _API_KEY else genai.Client()
 
+# ---------------------------------------------------------------------------
+# Hugging Face image generation
+# ---------------------------------------------------------------------------
+# Image generation is intentionally separate from the Gemini text pipeline.
+# Each GeneratedIdea calls this function only when the user clicks
+# "Generate Image" (or "Regenerate Image").
+#
+# .env:
+#   HF_TOKEN=hf_...
+# Optional:
+#   HF_IMAGE_MODEL=black-forest-labs/FLUX.1-schnell
+#   HF_IMAGE_PROVIDER=auto
+# ---------------------------------------------------------------------------
+
+_HF_TOKEN = os.getenv("HF_TOKEN")
+HF_IMAGE_MODEL = os.getenv(
+    "HF_IMAGE_MODEL",
+    "black-forest-labs/FLUX.1-schnell",
+)
+HF_IMAGE_PROVIDER = os.getenv("HF_IMAGE_PROVIDER", "auto")
+
+image_client = (
+    InferenceClient(
+        provider=HF_IMAGE_PROVIDER,
+        api_key=_HF_TOKEN,
+    )
+    if _HF_TOKEN
+    else None
+)
 # Optional explicit model order:
 # GEMINI_MODELS="gemini-2.5-flash,gemini-2.0-flash"
 # or:
@@ -752,3 +784,271 @@ RULES FOR ALL IDEAS:
         }
         for i in ideas
     ]
+
+def _image_headline(topic: str, draft_copy: str = "") -> str:
+    """
+    Turn the idea topic into a short headline suitable for rendering inside
+    the generated advertisement. Prefer the topic because it is already the
+    AI-generated core headline; fall back to the first sentence of the copy.
+    """
+    headline = (topic or "").strip()
+
+    # Remove the metadata prefix used by _idea_label():
+    # "[2026-11-05 | Diwali | Fresh] Festive Buffet"
+    if headline.startswith("[") and "]" in headline:
+        headline = headline.split("]", 1)[1].strip()
+
+    # Keep generated image text short enough to render cleanly.
+    headline = re.sub(r"\s+", " ", headline)
+    headline = headline.strip(" .:-")
+    if not headline:
+        headline = re.split(r"[.!?\n]", (draft_copy or "").strip(), maxsplit=1)[0].strip()
+
+    return headline[:70]
+
+
+def generate_image(
+    image_concept: str,
+    topic: str = "",
+    draft_copy: str = "",
+    cta_suggested: str = "",
+    business_name: str = "",
+) -> Dict[str, Any]:
+    """
+    Generate exactly one marketing image for one GeneratedIdea using
+    Hugging Face Inference Providers.
+
+    The image model receives the actual post context rather than only the
+    image_concept, so the visual can match the message being advertised.
+
+    Returns:
+        {
+            "data": bytes,
+            "mime_type": str,
+        }
+    """
+    if not _HF_TOKEN or image_client is None:
+        raise AIProviderError(
+            "HF_TOKEN is not configured. Add your Hugging Face token to .env."
+        )
+
+    if not image_concept or not image_concept.strip():
+        raise AIProviderError("This idea does not have an image concept.")
+
+    headline = _image_headline(topic, draft_copy)
+
+    context_lines = [
+        f"POST TOPIC / HEADLINE: {headline}" if headline else "",
+        f"POST COPY: {draft_copy.strip()}" if draft_copy else "",
+        f"CTA: {cta_suggested.strip()}" if cta_suggested else "",
+        f"BUSINESS: {business_name.strip()}" if business_name else "",
+        f"IMAGE CONCEPT: {image_concept.strip()}",
+    ]
+    context = "\n".join(line for line in context_lines if line)
+
+    prompt = f"""
+  Create ONE premium, finished advertising photograph for a local business.
+  
+  This is a PROFESSIONAL COMMERCIAL ADVERTISEMENT, not a flyer, poster,
+  social-media template, collage, or generic AI artwork.
+  
+  POST CONTEXT:
+  {context}
+  
+  BUSINESS / BRAND:
+  {business_name}
+  
+  IMPORTANT CREATIVE DIRECTION:
+  The PRODUCT / FOOD / SERVICE must be the absolute hero of the image.
+  
+  Think like a world-class food advertising photographer and creative director.
+  
+  The viewer should immediately look at the product first.
+  
+  COMPOSITION:
+  - Make the main product the largest and most visually important element.
+  - Product should occupy roughly 60–75% of the visual attention.
+  - Put the product prominently in the center or slightly below center.
+  - Use an intentional hero-product composition.
+  - Show realistic texture, crisp edges, appetizing detail, natural imperfections,
+    realistic ingredients, realistic surfaces and believable lighting.
+  - Use cinematic commercial photography rather than an "AI art" appearance.
+  - Use depth of field carefully: the PRODUCT must remain sharp and detailed.
+  - Background can have tasteful depth and atmosphere, but must never compete
+    with the product.
+  - Avoid excessive blur.
+  - Avoid excessive bokeh.
+  - Avoid oversaturated colors.
+  - Avoid plastic-looking food.
+  - Avoid surreal lighting.
+  - Avoid floating objects or physically impossible food.
+  - Make the scene feel like a real professional advertising photoshoot.
+  
+  LIGHTING:
+  - Premium commercial food photography.
+  - Cinematic but believable lighting.
+  - Beautiful directional key light on the product.
+  - Natural highlights and realistic shadows.
+  - Subtle warm atmosphere where appropriate.
+  - Rich but realistic colors.
+  - Detailed food texture.
+  - High dynamic range.
+  - Professional editorial color grading.
+  - Photorealistic camera rendering.
+  - Real lens characteristics.
+  - No obvious AI artifacts.
+  
+  VISUAL STYLE:
+  Think:
+  premium restaurant campaign,
+  high-end food commercial,
+  modern brand advertising,
+  editorial food photography,
+  cinematic product photography.
+  
+  The final image should look like something a major consumer brand
+  could actually publish as a campaign advertisement.
+  
+  TEXT DESIGN:
+  DO NOT place the post title or topic as a giant headline.
+  
+  DO NOT render:
+  "{headline}"
+  
+  Instead, create ONE short, catchy BRAND TAGLINE inspired by the post context.
+  
+  The tagline should feel like memorable advertising copy:
+  short,
+  playful,
+  confident,
+  rhythmic,
+  easy to remember,
+  and emotionally connected to the product.
+  
+  Examples of the STYLE of tagline:
+  "Made to Make You Smile"
+  "Good Food. Great Moments."
+  "Bring Your Appetite."
+  "Made Fresh. Made Happy."
+  "Gather. Eat. Repeat."
+  
+  Do NOT copy these examples literally unless they naturally fit.
+  
+  Create a NEW tagline based on the actual post context.
+  
+  TYPOGRAPHY:
+  - The tagline should use a bold, expressive, funky advertising type style.
+  - Think modern brand campaign typography rather than a boring default font.
+  - Use playful letterforms, confident weight, tasteful personality and strong
+    visual rhythm.
+  - The typography should feel intentionally designed by a professional
+    graphic designer.
+  - Do not use generic Arial/Helvetica-style plain text.
+  - Do not use a corporate presentation font.
+  - Do not use huge block text covering the product.
+  - Keep the tagline relatively small compared with the hero product.
+  - Place the tagline ABOVE the hero product, with generous breathing room.
+  - Make sure the tagline is clearly readable but subordinate to the product.
+  - Never place text directly across the most important part of the food.
+  
+  BRAND NAME:
+  At the bottom of the advertisement, add the business/brand name:
+  
+  "{business_name}"
+  
+  Treat this like a premium brand signature.
+  
+  The brand name should be smaller than the product and visually refined.
+  It can sit beneath the product with clean spacing and subtle styling.
+  
+  TEXT HIERARCHY:
+  1. HERO PRODUCT — overwhelmingly dominant
+  2. SHORT FUNKY TAGLINE — secondary
+  3. BRAND NAME — small signature at the bottom
+  
+  The advertisement should still look beautiful even if the viewer ignores
+  all the text.
+  
+  LAYOUT:
+  - Clean premium composition.
+  - Strong visual hierarchy.
+  - Generous negative space around typography.
+  - No giant title.
+  - No paragraph text.
+  - No bullet points.
+  - No captions.
+  - No fake promotional copy.
+  - No unnecessary decorative elements.
+  - No collage.
+  - No multiple panels.
+  - No UI.
+  - No poster template.
+  - No borders.
+  
+  FACTUAL SAFETY:
+  Only use information explicitly supported by the post context.
+  Do not invent:
+  prices,
+  discounts,
+  offers,
+  addresses,
+  phone numbers,
+  opening hours,
+  awards,
+  ingredients,
+  claims,
+  locations,
+  or product names.
+  
+  Do not invent a logo.
+  Do not create fake brand marks.
+  
+  FINAL QUALITY:
+  The final result should look like a REAL photograph from a premium
+  commercial advertising campaign, not an AI-generated illustration.
+  
+  The product must be irresistibly appetizing, physically believable,
+  highly detailed and the unmistakable center of attention.
+  
+  OUTPUT:
+  ONE finished advertising image.
+  Premium commercial photography.
+  Clean composition.
+  Photorealistic.
+  Cinematic.
+  Brand-ready.
+  """
+
+    try:
+        print(
+            f"[IMAGE AI] generating with Hugging Face "
+            f"model={HF_IMAGE_MODEL}, provider={HF_IMAGE_PROVIDER}"
+        )
+
+        output_image = image_client.text_to_image(
+            prompt=prompt,
+            model=HF_IMAGE_MODEL,
+        )
+
+        # huggingface_hub returns a PIL Image for text_to_image().
+        buffer = BytesIO()
+        output_image.save(buffer, format="PNG")
+        image_bytes = buffer.getvalue()
+
+        if not image_bytes:
+            raise AIProviderError("Hugging Face returned an empty image.")
+
+        return {
+            "data": image_bytes,
+            "mime_type": "image/png",
+        }
+
+    except AIProviderError:
+        raise
+
+    except Exception as e:
+        msg = " ".join(str(e).split())
+        print(f"[IMAGE AI] Hugging Face generation failed: {msg[:500]}")
+        raise AIProviderError(
+            f"Hugging Face image generation failed: {msg[:300]}"
+        ) from e

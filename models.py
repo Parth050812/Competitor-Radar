@@ -1,7 +1,7 @@
 from typing import Optional, List, Any
 from datetime import datetime
 from sqlmodel import Field, SQLModel, Relationship
-from pydantic import field_validator
+from pydantic import field_validator,BaseModel
 
 
 def _parse_dt(value: Any):
@@ -97,10 +97,16 @@ class ScrapeLog(SQLModel, table=True):
 class GeneratedIdea(SQLModel, table=True):
     id: Optional[int] = Field(default=None, primary_key=True)
     project_id: int = Field(foreign_key="project.id")
+
     topic: str
     draft_copy: str
     cta_suggested: str
     image_concept: str
+
+    # Generated image stored directly in SQLite
+    image_data: Optional[bytes] = Field(default=None)
+    image_mime_type: Optional[str] = Field(default=None)
+
     keywords: Optional[str] = None
     created_at: datetime = Field(default_factory=datetime.utcnow)
 
@@ -110,3 +116,16 @@ class GeneratedIdea(SQLModel, table=True):
     @classmethod
     def _v(cls, value):
         return _parse_dt(value)
+
+class GeneratedIdeaResponse(BaseModel):
+    id: int
+    project_id: int
+    topic: str
+    draft_copy: str
+    cta_suggested: str
+    image_concept: str
+    keywords: Optional[str] = None
+    created_at: datetime
+
+    has_image: bool
+    image_url: Optional[str] = None

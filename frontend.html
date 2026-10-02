@@ -75,6 +75,75 @@ dialog label{display:block;margin:10px 0 4px;font-weight:700}dialog input{width:
 .k.big{font-size:16px;padding:3px 12px}
 
 /* live "system is working" panel */#work{position:fixed;left:16px;bottom:16px;width:min(340px,calc(100vw - 32px));display:flex;flex-direction:column;gap:10px;z-index:9998}.wk{background:#fff;border:3px solid var(--ink);box-shadow:5px 5px 0 var(--ink);padding:10px 12px}.wk-top{display:flex;align-items:center;gap:8px}.wk-top b{flex:1;min-width:0;font-size:13px;text-transform:uppercase}.wk-time{font-size:12px;font-weight:700;background:var(--ink);color:var(--lime);padding:0 6px}.wk-spin{flex:none;width:14px;height:14px;border:3px solid var(--ink);border-top-color:transparent;border-radius:50%;animation:sp .7s linear infinite}.wk-hint{font-size:13px;margin:6px 0 8px}.wk-bar{position:relative;height:10px;border:2px solid var(--ink);overflow:hidden}.wk-bar i{position:absolute;top:0;bottom:0;width:35%;background:var(--lime);border-right:2px solid var(--ink);animation:slide 1.2s ease-in-out infinite}@keyframes slide{from{left:-35%}to{left:100%}}.chip.live{background:var(--lime);animation:pulse 1s ease-in-out infinite}@keyframes pulse{50%{opacity:.5}}@media(max-width:700px){#toast{bottom:auto;top:16px;transform:translateY(-160%)}#toast.on{transform:none}}
+/* ---------- generated idea cards ---------- */
+
+.idea-card {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 320px;
+  gap: 20px;
+  align-items: stretch;
+}
+
+.idea-content {
+  min-width: 0;
+}
+
+.idea-image-side {
+  min-height: 240px;
+  border-radius: 12px;
+  overflow: hidden;
+  background: #f3f3f3;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.idea-image {
+  width: 100%;
+  height: 100%;
+  min-height: 240px;
+  object-fit: cover;
+  display: block;
+}
+
+.idea-image-placeholder {
+  width: 100%;
+  min-height: 240px;
+  padding: 20px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  text-align: center;
+  color: #777;
+}
+
+.idea-image-placeholder .image-icon {
+  font-size: 42px;
+}
+
+.idea-image-placeholder span {
+  font-size: 14px;
+}
+
+.idea-image-side .btn {
+  margin-top: 4px;
+}
+
+@media (max-width: 760px) {
+  .idea-card {
+    grid-template-columns: 1fr;
+  }
+
+  .idea-image-side {
+    min-height: 220px;
+  }
+
+  .idea-image {
+    min-height: 220px;
+  }
+}
 </style>
 </head>
 <body>
@@ -402,26 +471,189 @@ async function loadIdeas() {
   drawIdeas();
 }
 function drawIdeas() {
-  $('#ideas').innerHTML = ideas.length ? ideas.map(i => {
-    const m = (i.topic || '').match(/^\[(.+?)\]\s*(.*)$/), tg = m ? m[1].split('|').map(s => s.trim()) : [];
-    return `<article class="card"><div>${tg.map((s, k) => `<i class="chip ${k === 0 ? 'dark' : ''}">${k === 0 ? '📅 ' : ''}${esc(s)}</i>`).join('')}</div>
-      <h3>${esc(m ? m[2] : i.topic)}</h3><p class="txt">${esc(i.draft_copy)}</p>
-      <p>🔘 <b>Button:</b> ${esc(i.cta_suggested)}<br>🖼 <b>Picture idea:</b> ${esc(i.image_concept)}</p>
-      <div>${chips(i.keywords)}</div>
-      <div style="margin-top:8px"><button class="btn sm" data-copy="${i.id}">Copy text</button> <button class="btn sm red" data-del="${i.id}">Delete</button></div></article>`;
-  }).join('') : '<p class="empty">No ideas yet. Press the green button above.</p>';
+  $('#ideas').innerHTML = ideas.length
+    ? ideas.map(i => {
+        const m = (i.topic || '').match(
+          /^\[(.+?)\]\s*(.*)$/
+        );
+
+        const tg = m
+          ? m[1].split('|').map(s => s.trim())
+          : [];
+
+        const title = m ? m[2] : i.topic;
+
+        const imageSide = i.image_url
+          ? `
+            <div class="idea-image-side">
+              <img
+                class="idea-image"
+                src="${esc(i.image_url)}"
+                alt="Generated marketing image"
+                loading="lazy"
+                onerror="this.parentElement.innerHTML =
+                  '<div class=&quot;idea-image-placeholder&quot;>' +
+                  '<div class=&quot;image-icon&quot;>⚠️</div>' +
+                  '<span>Image could not be loaded</span>' +
+                  '</div>'"
+              >
+            </div>
+          `
+          : `
+            <div class="idea-image-side">
+              <div class="idea-image-placeholder">
+                <div class="image-icon">🖼️</div>
+                <span>No image generated yet</span>
+
+                <button
+                  class="btn sm"
+                  data-image="${i.id}"
+                >
+                  Generate Image
+                </button>
+              </div>
+            </div>
+          `;
+
+        return `
+          <article class="card idea-card">
+
+            <div class="idea-content">
+
+              <div>
+                ${tg.map((s, k) =>
+                  `<i class="chip ${k === 0 ? 'dark' : ''}">
+                    ${k === 0 ? '📅 ' : ''}
+                    ${esc(s)}
+                  </i>`
+                ).join('')}
+              </div>
+
+              <h3>${esc(title)}</h3>
+
+              <p class="txt">
+                ${esc(i.draft_copy)}
+              </p>
+
+              <p>
+                🔘 <b>Button:</b>
+                ${esc(i.cta_suggested)}
+                <br>
+
+                🖼 <b>Picture idea:</b>
+                ${esc(i.image_concept)}
+              </p>
+
+              <div>
+                ${chips(i.keywords)}
+              </div>
+
+              <div style="margin-top:8px">
+                <button
+                  class="btn sm"
+                  data-copy="${i.id}"
+                >
+                  Copy text
+                </button>
+
+                <button
+                  class="btn sm red"
+                  data-del="${i.id}"
+                >
+                  Delete
+                </button>
+              </div>
+
+            </div>
+
+            ${imageSide}
+
+          </article>
+        `;
+      }).join('')
+    : '<p class="empty">No ideas yet. Press the green button above.</p>';
 }
 $('#ideas').onclick = e => {
-  const c = e.target.closest('[data-copy]'), x = e.target.closest('[data-del]');
+
+  const c = e.target.closest('[data-copy]');
+  const x = e.target.closest('[data-del]');
+  const g = e.target.closest('[data-image]');
+
+  /* ---------- copy ---------- */
+
   if (c) {
-    const i = ideas.find(v => v.id == c.dataset.copy);
-    navigator.clipboard.writeText(i.draft_copy).then(() => toast('Copied ✓')).catch(() => toast('Select the text and copy it by hand'));
+    const i = ideas.find(
+      v => v.id == c.dataset.copy
+    );
+
+    navigator.clipboard
+      .writeText(i.draft_copy)
+      .then(() => toast('Copied ✓'))
+      .catch(() =>
+        toast(
+          'Select the text and copy it by hand'
+        )
+      );
+
+    return;
   }
-  if (x && confirm('Delete this idea for good?')) run(x, 'Deleting…', async () => {
-    await api('/ideas/' + x.dataset.del, {method:'DELETE'});
-    ideas = ideas.filter(v => v.id != x.dataset.del); drawIdeas(); dash(); toast('Idea deleted');
-  });
-};
+
+  /* ---------- delete ---------- */
+
+  if (
+    x &&
+    confirm('Delete this idea for good?')
+  ) {
+    run(
+      x,
+      'Deleting…',
+      async () => {
+        await api(
+          '/ideas/' + x.dataset.del,
+          {method:'DELETE'}
+        );
+
+        ideas = ideas.filter(
+          v => v.id != x.dataset.del
+        );
+
+        drawIdeas();
+        dash();
+
+        toast('Idea deleted');
+      }
+    );
+
+    return;
+  }
+
+  /* ---------- generate ONE image ---------- */
+
+  if (g) {
+    const ideaId = g.dataset.image;
+
+    run(
+      g,
+      'Generating…',
+      async () => {
+        await api(
+          `/ideas/${ideaId}/generate-image/`,
+          {method:'POST'}
+        );
+
+        await loadIdeas();
+
+        toast('Image generated ✓');
+      },
+      [
+        'AI is creating your image',
+        'Turning the picture idea into a finished marketing image.'
+      ]
+    );
+
+    return;
+  }
+};  
 $('#gbtn').onclick = () => run($('#gbtn'), 'Thinking… (up to 2 min)', async () => {
   await api(`/projects/${pid}/generate-ideas/`, {method:'POST', body:JSON.stringify({count:+$('#cnt').value})});
   await loadIdeas(); dash(); toast('New ideas ready ✓');

@@ -5,11 +5,16 @@ from fastapi import FastAPI, BackgroundTasks, Depends, HTTPException
 from sqlmodel import SQLModel, Session, create_engine, select
 from pydantic import BaseModel
 from fastapi import HTTPException
-from models import Project, Competitor, ScrapedPost, GeneratedIdea, Keyword, ScrapeLog
+from models import Project, Competitor, ScrapedPost, GeneratedIdea, Keyword, ScrapeLog, GeneratedIdeaResponse
 from scraper import run_competitor_scrape, search_place_candidates, CaptchaBlocked
-from ai_providers import analyze_posts, generate_ideas, AIProviderError  # simple wrapper module, see below
+from ai_providers import (
+    analyze_posts,
+    generate_ideas,
+    generate_image,
+    AIProviderError,
+)# simple wrapper module, see below
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, Response
 from pathlib import Path
 
 BASE_DIR = Path(__file__).resolve().parent
@@ -20,6 +25,26 @@ engine = create_engine(sqlite_url, connect_args={"check_same_thread": False})
 def create_db_and_tables():
     SQLModel.metadata.create_all(engine)
 
+def migrate_database():
+    from sqlalchemy import inspect, text
+
+    inspector = inspect(engine)
+
+    columns = {
+        column["name"]
+        for column in inspector.get_columns("generatedidea")
+    }
+
+    with engine.begin() as conn:
+        if "image_data" not in columns:
+            conn.execute(
+                text("ALTER TABLE generatedidea ADD COLUMN image_data BLOB")
+            )
+
+        if "image_mime_type" not in columns:
+            conn.execute(
+                text("ALTER TABLE generatedidea ADD COLUMN image_mime_type VARCHAR")
+            )
 
 def get_session():
     with Session(engine) as session:
@@ -34,6 +59,7 @@ app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], all
 @app.on_event("startup")
 def on_startup():
     create_db_and_tables()
+    migrate_database()
 
 
 @app.get("/", include_in_schema=False)
@@ -400,12 +426,118 @@ def delete_competitor(competitor_id: int, session: Session = Depends(get_session
  
 # 2) ADD these two routes anywhere below the generate-ideas route.
  
-@app.get("/projects/{project_id}/ideas/", response_model=List[GeneratedIdea])
-def list_project_ideas(project_id: int, session: Session = Depends(get_session)):
-    return session.exec(
-        select(GeneratedIdea).where(GeneratedIdea.project_id == project_id).order_by(GeneratedIdea.id)
+@app.get(
+    "/projects/{project_id}/ideas/",
+    response_model=List[GeneratedIdeaResponse],
+)
+def list_project_ideas(
+    project_id: int,
+    session: Session = Depends(get_session),
+):
+    ideas = session.exec(
+        select(GeneratedIdea)
+        .where(GeneratedIdea.project_id == project_id)
+        .order_by(GeneratedIdea.id)
     ).all()
- 
+
+    return [
+        GeneratedIdeaResponse(
+            id=idea.id,
+            project_id=idea.project_id,
+            topic=idea.topic,
+            draft_copy=idea.draft_copy,
+            cta_suggested=idea.cta_suggested,
+            image_concept=idea.image_concept,
+            keywords=idea.keywords,
+            created_at=idea.created_at,
+            has_image=idea.image_data is not None,
+            image_url=(
+                f"/ideas/{idea.id}/image"
+                if idea.image_data
+                else None
+            ),
+        )
+        for idea in ideas
+    ]
+
+@app.post("/ideas/{idea_id}/generate-image/")
+def generate_idea_image(
+    idea_id: int,
+    session: Session = Depends(get_session),
+):
+    idea = session.get(GeneratedIdea, idea_id)
+
+    if not idea:
+        raise HTTPException(
+            status_code=404,
+            detail="Idea not found",
+        )
+
+    if not idea.image_concept:
+        raise HTTPException(
+            status_code=400,
+            detail="This idea has no image concept.",
+        )
+
+    try:
+        project = session.get(Project, idea.project_id)
+        
+        result = generate_image(
+            idea.image_concept,
+            topic=idea.topic,
+            draft_copy=idea.draft_copy,
+            cta_suggested=idea.cta_suggested,
+            business_name=project.target_business if project else "",
+        )
+
+    except AIProviderError as e:
+        print(
+            f"[generate-image] failed: {e}"
+        )
+
+        raise HTTPException(
+            status_code=503,
+            detail=str(e),
+        )
+
+    idea.image_data = result["data"]
+    idea.image_mime_type = result["mime_type"]
+
+    session.add(idea)
+    session.commit()
+
+    return {
+        "id": idea.id,
+        "status": "generated",
+        "image_url": f"/ideas/{idea.id}/image",
+    }
+
+@app.get("/ideas/{idea_id}/image")
+def get_idea_image(
+    idea_id: int,
+    session: Session = Depends(get_session),
+):
+    idea = session.get(GeneratedIdea, idea_id)
+
+    if not idea:
+        raise HTTPException(
+            status_code=404,
+            detail="Idea not found",
+        )
+
+    if not idea.image_data:
+        raise HTTPException(
+            status_code=404,
+            detail="Image has not been generated yet.",
+        )
+
+    return Response(
+        content=idea.image_data,
+        media_type=idea.image_mime_type or "image/png",
+        headers={
+            "Cache-Control": "public, max-age=3600"
+        },
+    )
  
 @app.delete("/ideas/{idea_id}")
 def delete_idea(idea_id: int, session: Session = Depends(get_session)):
