@@ -11,6 +11,7 @@ from ai_providers import (
     analyze_posts,
     generate_ideas,
     generate_image,
+    find_trends,
     AIProviderError,
 )# simple wrapper module, see below
 from fastapi.middleware.cors import CORSMiddleware
@@ -44,6 +45,16 @@ def migrate_database():
         if "image_mime_type" not in columns:
             conn.execute(
                 text("ALTER TABLE generatedidea ADD COLUMN image_mime_type VARCHAR")
+            )
+
+        if "source_trend" not in columns:
+            conn.execute(
+                text("ALTER TABLE generatedidea ADD COLUMN source_trend VARCHAR")
+            )
+
+        if "strategy_reason" not in columns:
+            conn.execute(
+                text("ALTER TABLE generatedidea ADD COLUMN strategy_reason VARCHAR")
             )
 
 def get_session():
@@ -198,7 +209,16 @@ def edit_competitor(competitor_id: int, body: CompetitorIn, session: Session = D
 def add_keyword(project_id: int, body: KeywordIn, session: Session = Depends(get_session)):
     if not session.get(Project, project_id):
         raise HTTPException(status_code=404, detail="Project not found")
-    keyword = Keyword(project_id=project_id, text=body.text)
+    text_value = (body.text or "").strip()
+    if not text_value:
+        raise HTTPException(status_code=400, detail="Keyword cannot be empty")
+
+    existing = session.exec(select(Keyword).where(Keyword.project_id == project_id)).all()
+    for item in existing:
+        if (item.text or "").strip().casefold() == text_value.casefold():
+            return item
+
+    keyword = Keyword(project_id=project_id, text=text_value)
     session.add(keyword)
     session.commit()
     session.refresh(keyword)
@@ -207,7 +227,26 @@ def add_keyword(project_id: int, body: KeywordIn, session: Session = Depends(get
 
 @app.get("/projects/{project_id}/keywords/", response_model=List[Keyword])
 def list_keywords(project_id: int, session: Session = Depends(get_session)):
-    return session.exec(select(Keyword).where(Keyword.project_id == project_id)).all()
+    rows = session.exec(select(Keyword).where(Keyword.project_id == project_id).order_by(Keyword.id)).all()
+    seen = set()
+    unique = []
+    for row in rows:
+        key = (row.text or "").strip().casefold()
+        if not key or key in seen:
+            continue
+        seen.add(key)
+        unique.append(row)
+    return unique
+
+
+@app.delete("/projects/{project_id}/keywords/{keyword_id}")
+def delete_keyword(project_id: int, keyword_id: int, session: Session = Depends(get_session)):
+    keyword = session.get(Keyword, keyword_id)
+    if not keyword or keyword.project_id != project_id:
+        raise HTTPException(status_code=404, detail="Keyword not found")
+    session.delete(keyword)
+    session.commit()
+    return {"ok": True}
 
 
 # --- 4. SCRAPING (background worker + persistent logs + CAPTCHA handling) ---
@@ -229,12 +268,39 @@ def background_scrape_worker(competitor_id: int):
             new_count = 0
             dup_count = 0
             for item in scraped_data:
+                # Primary duplicate rule: same competitor + same content hash.
+                # The hash is based on visible post content, not Google's transient ID.
                 exists = session.exec(
-                    select(ScrapedPost).where(ScrapedPost.content_hash == item["content_hash"])
+                    select(ScrapedPost).where(
+                        ScrapedPost.competitor_id == competitor_id,
+                        ScrapedPost.content_hash == item["content_hash"],
+                    )
                 ).first()
+
+                # Backward compatibility for rows created before content-based hashes.
+                if not exists and item.get("post_id"):
+                    exists = session.exec(
+                        select(ScrapedPost).where(
+                            ScrapedPost.competitor_id == competitor_id,
+                            ScrapedPost.post_id == item.get("post_id"),
+                        )
+                    ).first()
+
+                if not exists:
+                    exists = session.exec(
+                        select(ScrapedPost).where(
+                            ScrapedPost.competitor_id == competitor_id,
+                            ScrapedPost.published_date == item.get("date"),
+                            ScrapedPost.title == item.get("title"),
+                            ScrapedPost.content == item.get("content"),
+                            ScrapedPost.validity == item.get("validity"),
+                        )
+                    ).first()
+
                 if exists:
                     dup_count += 1
                     continue
+
                 session.add(ScrapedPost(
                     competitor_id=competitor_id,
                     content=item["content"],
@@ -318,44 +384,124 @@ def analyze_project(project_id: int, session: Session = Depends(get_session)):
 
     if not posts:
         raise HTTPException(status_code=400, detail="No posts to analyze yet — scrape competitors first")
+
+    # Only send posts that have not been analyzed yet. A post is considered
+    # analyzed when it has a non-empty AI topic. This prevents every click of
+    # the button from re-processing the entire repository.
+    pending = [p for p in posts if not (p.topic or "").strip()]
+
+    if not pending:
+        return {"analyzed_posts": 0, "remaining_unanalyzed": 0, "message": "All posts are already analyzed."}
+
     try:
-        results = analyze_posts([p.content for p in posts])
+        results = analyze_posts([p.content for p in pending])
     except AIProviderError:
         raise HTTPException(status_code=503, detail="AI is busy right now, please try again in a minute.")
-    for post, result in zip(posts, results):
-        post.topic = result.get("topic")
-        post.keywords_detected = ", ".join(result.get("keywords", []))
+
+    analyzed_now = 0
+    for post, result in zip(pending, results):
+        topic = (result.get("topic") or "").strip()
+        keywords = result.get("keywords", []) or []
+        # If the model returns no topic, leave the post pending so a later
+        # analysis run can try it again rather than falsely marking it done.
+        if not topic:
+            continue
+        post.topic = topic
+        post.keywords_detected = ", ".join(keywords)
         session.add(post)
+        analyzed_now += 1
+
     session.commit()
 
-    return {"analyzed_posts": len(posts)}
+    remaining = len([p for p in pending if not (p.topic or "").strip()])
+    return {
+        "analyzed_posts": analyzed_now,
+        "remaining_unanalyzed": remaining,
+    }
 
 
 @app.get("/projects/{project_id}/trends/")
 def project_trends(project_id: int, session: Session = Depends(get_session)):
     competitors = session.exec(select(Competitor).where(Competitor.project_id == project_id)).all()
     competitor_ids = [c.id for c in competitors]
-    posts = session.exec(select(ScrapedPost).where(ScrapedPost.competitor_id.in_(competitor_ids))).all() if competitor_ids else []
+    posts = (
+        session.exec(
+            select(ScrapedPost).where(ScrapedPost.competitor_id.in_(competitor_ids))
+        ).all()
+        if competitor_ids
+        else []
+    )
 
-    topic_to_competitors = {}
-    for post in posts:
-        if not post.topic:
-            continue
-        topic_to_competitors.setdefault(post.topic, set()).add(post.competitor_id)
+    trend_rows, _, _, _ = find_trends(
+        posts=[
+            {
+                "content": p.content,
+                "topic": p.topic,
+                "keywords": p.keywords_detected,
+                "competitor_id": p.competitor_id,
+                "published_date": p.published_date,
+            }
+            for p in posts
+        ]
+    )
+    return trend_rows
 
-    total_competitors = len(competitors) or 1
-    return [
-        {
-            "topic": topic,
-            "competitors_using": len(comp_ids),
-            "total_competitors": total_competitors,
-            "occurrence_pct": round(len(comp_ids) / total_competitors * 100, 1),
-        }
-        for topic, comp_ids in sorted(topic_to_competitors.items(), key=lambda x: -len(x[1]))
-    ]
+
+def _strategy_reason(idea: dict, trend_rows: list[dict], focus_keywords: Optional[list[str]] = None) -> str:
+    """Short, plain-English explanation shown under each generated idea."""
+    idea_type = idea.get("idea_type", "fresh")
+    source = (idea.get("source_trend") or "None").strip()
+    occasion = (idea.get("occasion") or "Evergreen").strip()
+
+    requested_focus = [str(k).strip() for k in (focus_keywords or []) if str(k).strip()]
+    matched_focus = [str(k).strip() for k in (idea.get("focus_keywords_used") or []) if str(k).strip()]
+    if not matched_focus:
+        idea_keywords = [str(k).strip() for k in (idea.get("keywords") or []) if str(k).strip()]
+        copy = str(idea.get("draft_copy") or "")
+        matched_focus = [
+            fk for fk in requested_focus
+            if any(fk.casefold() in k.casefold() or k.casefold() in fk.casefold() for k in idea_keywords)
+            or fk.casefold() in copy.casefold()
+        ]
+    focus_keywords = matched_focus
+
+    if idea_type == "trend_remix" and source and source.lower() != "none":
+        match = next(
+            (row for row in trend_rows if row["topic"].strip().lower() == source.lower()),
+            None,
+        )
+        if match:
+            reason = (
+                f"I used {match['topic']} because {match['competitors_using']} of "
+                f"{match['total_competitors']} tracked rivals use it "
+                f"({match['occurrence_pct']}%)."
+            )
+        else:
+            reason = f"I used {source} because it is one of the main topics found in competitor posts."
+
+        trend_keywords = [str(k).strip() for k in (match.get("top_keywords") or []) if str(k).strip()] if match else []
+        if trend_keywords:
+            reason += f" I also used keywords seen in those posts, such as {', '.join(trend_keywords[:2])}."
+        if focus_keywords:
+            reason += f" It also uses your focus keyword{'' if len(focus_keywords) == 1 else 's'}: {', '.join(focus_keywords[:2])}."
+        if occasion.lower() != "evergreen":
+            reason += f" I also used {occasion} because it is coming up soon."
+        return reason
+
+    if focus_keywords and occasion.lower() != "evergreen":
+        return f"I chose a less-used competitor angle, used your focus keyword{'' if len(focus_keywords) == 1 else 's'}: {', '.join(focus_keywords[:2])}, and added {occasion} because it is coming up soon."
+
+    if focus_keywords:
+        return f"I chose a less-used angle and used your focus keyword{'' if len(focus_keywords) == 1 else 's'}: {', '.join(focus_keywords[:2])}."
+
+    if occasion.lower() != "evergreen":
+        return f"I chose a less-used competitor angle and added {occasion} because it is coming up soon."
+
+    return "I chose a less-used angle so your posts are not all based on the same topics competitors are using."
 
 
 # --- 7. IDEA GENERATION (with dedup vs. previously generated ideas) ---
+
 
 
 @app.post("/projects/{project_id}/generate-ideas/")
@@ -378,25 +524,51 @@ def generate_project_ideas(project_id: int, body: IdeaRequest, session: Session 
     try:
         new_ideas = generate_ideas(
             posts=[
-                {"content": p.content, "topic": p.topic, "keywords": p.keywords_detected}
+                {
+                    "content": p.content,
+                    "topic": p.topic,
+                    "keywords": p.keywords_detected,
+                    "competitor_id": p.competitor_id,
+                    "published_date": p.published_date,
+                }
                 for p in posts
             ],
             count=body.count,
             avoid_topics=previous_topics,
             business_name=project.target_business,
+            focus_keywords=[k.text for k in session.exec(select(Keyword).where(Keyword.project_id == project_id)).all()],
         )
     except AIProviderError as e:
         print(f"[generate-ideas] failed: {e}")
         raise HTTPException(status_code=503, detail="AI is busy right now, please try again in a minute.")
 
+    trend_rows, _, _, _ = find_trends(
+        posts=[
+            {
+                "content": p.content,
+                "topic": p.topic,
+                "keywords": p.keywords_detected,
+                "competitor_id": p.competitor_id,
+                "published_date": p.published_date,
+            }
+            for p in posts
+        ]
+    )
+
+    focus_keyword_rows = session.exec(select(Keyword).where(Keyword.project_id == project_id)).all()
+    focus_keyword_texts = [k.text for k in focus_keyword_rows]
+
     saved = []
     for idea in new_ideas:
+        source_trend = idea.get("source_trend") or "None"
         record = GeneratedIdea(
             project_id=project_id,
             topic=idea["topic"],
             draft_copy=idea["draft_copy"],
             cta_suggested=idea["cta_suggested"],
             image_concept=idea["image_concept"],
+            source_trend=source_trend,
+            strategy_reason=_strategy_reason(idea, trend_rows, focus_keyword_texts),
             keywords=", ".join(idea.get("keywords", [])),
         )
         session.add(record)
@@ -437,7 +609,7 @@ def list_project_ideas(
     ideas = session.exec(
         select(GeneratedIdea)
         .where(GeneratedIdea.project_id == project_id)
-        .order_by(GeneratedIdea.id)
+        .order_by(GeneratedIdea.id.desc())
     ).all()
 
     return [
@@ -448,6 +620,8 @@ def list_project_ideas(
             draft_copy=idea.draft_copy,
             cta_suggested=idea.cta_suggested,
             image_concept=idea.image_concept,
+            source_trend=idea.source_trend,
+            strategy_reason=idea.strategy_reason,
             keywords=idea.keywords,
             created_at=idea.created_at,
             has_image=idea.image_data is not None,

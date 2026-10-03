@@ -102,6 +102,8 @@ class GeneratedIdea(SQLModel, table=True):
     draft_copy: str
     cta_suggested: str
     image_concept: str
+    source_trend: Optional[str] = None
+    strategy_reason: Optional[str] = None
 
     # Generated image stored directly in SQLite
     image_data: Optional[bytes] = Field(default=None)
@@ -124,6 +126,8 @@ class GeneratedIdeaResponse(BaseModel):
     draft_copy: str
     cta_suggested: str
     image_concept: str
+    source_trend: Optional[str] = None
+    strategy_reason: Optional[str] = None
     keywords: Optional[str] = None
     created_at: datetime
 

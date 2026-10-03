@@ -7,6 +7,7 @@
 <link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@500;700&display=swap" rel="stylesheet">
 <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.css">
 <link rel="icon" type="image/png" sizes="32x32" href="/logo.png">
+<script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
 <style>
 :root{--ink:#111;--lime:#d4ff3a}
 *{box-sizing:border-box}
@@ -75,6 +76,47 @@ dialog label{display:block;margin:10px 0 4px;font-weight:700}dialog input{width:
 .k.big{font-size:16px;padding:3px 12px}
 
 /* live "system is working" panel */#work{position:fixed;left:16px;bottom:16px;width:min(340px,calc(100vw - 32px));display:flex;flex-direction:column;gap:10px;z-index:9998}.wk{background:#fff;border:3px solid var(--ink);box-shadow:5px 5px 0 var(--ink);padding:10px 12px}.wk-top{display:flex;align-items:center;gap:8px}.wk-top b{flex:1;min-width:0;font-size:13px;text-transform:uppercase}.wk-time{font-size:12px;font-weight:700;background:var(--ink);color:var(--lime);padding:0 6px}.wk-spin{flex:none;width:14px;height:14px;border:3px solid var(--ink);border-top-color:transparent;border-radius:50%;animation:sp .7s linear infinite}.wk-hint{font-size:13px;margin:6px 0 8px}.wk-bar{position:relative;height:10px;border:2px solid var(--ink);overflow:hidden}.wk-bar i{position:absolute;top:0;bottom:0;width:35%;background:var(--lime);border-right:2px solid var(--ink);animation:slide 1.2s ease-in-out infinite}@keyframes slide{from{left:-35%}to{left:100%}}.chip.live{background:var(--lime);animation:pulse 1s ease-in-out infinite}@keyframes pulse{50%{opacity:.5}}@media(max-width:700px){#toast{bottom:auto;top:16px;transform:translateY(-160%)}#toast.on{transform:none}}
+/* ---------- trend chart ---------- */
+.trend-chart-wrap{position:relative;height:430px;margin-top:12px}
+.trend-chart-wrap canvas{width:100%!important;height:100%!important}
+.trend-explainer{margin-top:18px;background:#111;color:#fff;border:3px solid #111;padding:18px 20px;box-shadow:5px 5px 0 var(--lime)}
+.trend-explainer h3{color:var(--lime);margin-bottom:8px}
+.trend-explainer p{margin:7px 0;color:#f2f2f2}
+.trend-insight{display:grid;grid-template-columns:repeat(auto-fit,minmax(170px,1fr));gap:10px;margin-top:14px}
+.trend-insight div{border:2px solid var(--lime);padding:10px}
+.trend-insight b{display:block;font-size:20px;color:var(--lime)}
+.trend-insight span{font-size:12px;text-transform:uppercase}
+
+/* ---------- idea strategy header + audit labels ---------- */
+.idea-hero{display:grid;grid-template-columns:minmax(0,1fr) 360px;gap:20px;background:#111;color:#fff;border:3px solid var(--ink);box-shadow:6px 6px 0 var(--ink);padding:22px;margin-bottom:18px}
+.idea-hero .eyebrow{display:inline-block;background:var(--lime);color:var(--ink);border:2px solid var(--lime);padding:2px 8px;font-size:12px;font-weight:700;text-transform:uppercase;margin-bottom:8px}
+.idea-hero h2{font-size:clamp(24px,4vw,38px);line-height:1.05;margin-bottom:8px}
+.idea-hero p{margin:0;color:#f4f4f4;max-width:720px}
+.idea-proof{display:grid;grid-template-columns:repeat(3,1fr);gap:10px;align-items:stretch}
+.idea-proof div{border:2px solid var(--lime);padding:12px;display:flex;flex-direction:column;justify-content:center}
+.idea-proof b{font-size:24px;color:var(--lime);line-height:1}
+.idea-proof span{font-size:11px;text-transform:uppercase;margin-top:5px}
+.idea-strategy-card{background:#fff;border:3px solid var(--ink);box-shadow:5px 5px 0 var(--ink);padding:14px 16px;margin-bottom:20px}
+.idea-strategy-card h3{margin-bottom:5px}
+.idea-strategy-note{margin:0 0 10px;font-size:13px}
+.idea-trend-chips{display:flex;flex-wrap:wrap;gap:8px}
+.idea-trend-chip{background:#eaffb0;border:2px solid var(--ink);padding:7px 9px;font-size:12px;font-weight:700}
+.idea-trend-chip span{font-weight:500;margin-left:4px}
+.idea-strategy-loading{font-size:13px;font-weight:700}
+.idea-strategy{margin-top:16px;background:#111;color:#fff;border:3px solid #111;padding:12px 14px;box-shadow:4px 4px 0 var(--lime)}
+.idea-strategy strong{display:block;color:var(--lime);font-size:12px;text-transform:uppercase;margin-bottom:4px;letter-spacing:.5px}
+.idea-strategy span{font-size:13px;line-height:1.45}
+.focus-chip{display:inline-flex;align-items:center;gap:7px}
+.focus-chip button{display:inline-grid;place-items:center;width:20px;height:20px;margin-left:2px;border:2px solid #fff;background:#111;color:#fff;font:900 14px/1 Arial,sans-serif;border-radius:2px;cursor:pointer;padding:0;opacity:1}
+.focus-chip button:hover{background:#ffe600;color:#111;border-color:#111;transform:scale(1.08)}
+.keyword-hit{position:relative;display:inline-block;margin:7px 14px 5px 0;padding:5px 9px!important;border:3px solid #ffe600!important;background:#eaffb0!important;box-shadow:0 0 0 3px #111,0 0 12px rgba(255,230,0,.45);animation:keywordPulse 1s ease-in-out infinite alternate}
+.keyword-hit-label{position:absolute;right:-9px;top:-14px;background:#ffe600;color:#111;border:2px solid #111;padding:1px 5px;font:900 9px/1 Arial,sans-serif;letter-spacing:.4px;text-transform:uppercase}
+@keyframes keywordPulse{from{box-shadow:0 0 0 3px #111,0 0 5px rgba(255,230,0,.25)}to{box-shadow:0 0 0 3px #111,0 0 16px rgba(255,230,0,.9)}}
+@media(max-width:760px){
+  .idea-hero{grid-template-columns:1fr}
+  .idea-proof{grid-template-columns:repeat(3,1fr)}
+}
+
 /* ---------- generated idea cards ---------- */
 
 .idea-card {
@@ -87,6 +129,8 @@ dialog label{display:block;margin:10px 0 4px;font-weight:700}dialog input{width:
 .idea-content {
   min-width: 0;
 }
+.idea-content h3{margin:4px 0 4px}
+.idea-content .txt{margin-top:4px}
 
 .idea-image-side {
   min-height: 240px;
@@ -206,12 +250,37 @@ dialog label{display:block;margin:10px 0 4px;font-weight:700}dialog input{width:
     </section>
 
     <section class="pane" id="t3" hidden>
-      <div class="tip">👉 See which topics your rivals talk about the most. Analyze the posts in step 2 first, then come back here.</div>
-      <div class="card"><h2>What rivals talk about</h2><div id="trends"></div></div>
+      <div class="tip">👉 Analyze the posts in step 2 first. This chart shows how widely each topic is used across your tracked rivals. The same trend signal is fed into idea generation.</div>
+      <div class="card">
+        <h2>Spot trends</h2>
+        <p class="empty" style="margin-top:0">Each bar is the percentage of tracked rivals using that topic at least once.</p>
+        <div class="trend-chart-wrap" id="trendChartWrap"><canvas id="trendChart"></canvas></div>
+        <div id="trendExplainer"></div>
+        <div id="trends" hidden></div>
+      </div>
     </section>
 
     <section class="pane" id="t4" hidden>
-      <div class="tip">👉 Choose how many ideas you want and press the button. Each idea has ready-to-post text, a button label and a picture suggestion. The 📅 date is the best day to post it.</div>
+      <div class="idea-hero">
+        <div>
+          <div class="eyebrow">Trend-led idea engine</div>
+          <h2>Turn rival patterns into your next posts.</h2>
+          <p>The AI looks at the same trends shown in Spot Trends, then checks upcoming festivals and avoids repeating the same competitor angles.</p>
+        </div>
+        <div class="idea-proof">
+          <div><b id="ideaTrendCount">—</b><span>trend signals</span></div>
+          <div><b>60%</b><span>trend-led</span></div>
+          <div><b>60d</b><span>calendar window</span></div>
+        </div>
+      </div>
+
+      <div class="idea-strategy-card">
+        <h3>What the AI is using</h3>
+        <p class="idea-strategy-note">These are the same highest-coverage topics shown in <b>Spot Trends</b>. The AI does not see the chart as an image; it receives these measured signals directly.</p>
+        <div id="ideaStrategy" class="idea-trend-chips"><span class="idea-strategy-loading">Loading trend signals…</span></div>
+      </div>
+
+      <div class="tip">👉 Choose how many ideas you want. Each idea is planned for a date, can use an upcoming festival/occasion, and includes a black <b>Why this idea?</b> label showing the analysis behind it.</div>
       <div class="card bar-row">
         <select id="cnt"><option>3</option><option selected>5</option><option>8</option><option>10</option></select>
         <button class="btn" id="gbtn">Generate post ideas</button>
@@ -243,6 +312,7 @@ const ls = {get: k => { try { return JSON.parse(localStorage.getItem(k) || 'null
 const ST = {never_run:'Not scraped yet', success:'Scraped ✓', captcha_blocked:'Google blocked this run, try again later', error:'Failed, try again'};
 const busyComps = new Set();
 let pid = ls.get('pid'), comps = [], posts = [], hits = [], mk = [], map, layer;
+let focusKeywords = [];
 
 function toast(t){const e=$('#toast');e.textContent=t;e.classList.add('on');clearTimeout(toast.t);toast.t=setTimeout(()=>e.classList.remove('on'),4200)}
 
@@ -270,6 +340,9 @@ async function loadProjects() {
   $('#proj').innerHTML = ps.map(p => `<option value="${p.id}">${esc(p.name)}</option>`).join('') || '<option>No projects yet</option>';
   $('#main').hidden = !ps.length; $('#welcome').hidden = !!ps.length;
   if (!ps.length) return;
+  // Leaflet is optional for the rest of the app. If its CDN loaded late,
+  // initialize the map now that the main UI is visible.
+  initMap();
   if (!ps.some(p => p.id === pid)) pid = ps[0].id;
   $('#proj').value = pid; ls.set('pid', pid); refresh();
 }
@@ -287,7 +360,7 @@ async function refresh() {
   try {
     comps = await api(`/projects/${pid}/competitors/`);
     posts = await api(`/projects/${pid}/posts/`);
-    drawComps(); fillFilters(); drawPosts(); await dash(); await loadKw(); await loadIdeas().catch(() => {});
+    drawComps(); await loadKw(); fillFilters(); drawPosts(); await dash(); await loadIdeas().catch(() => {});
   } catch (e) { toast('⚠ ' + e.message); }
 }
 async function dash() {
@@ -302,7 +375,10 @@ async function dash() {
 function show(t) {
   document.querySelectorAll('.tab').forEach(b => b.classList.toggle('on', b.dataset.t === t));
   document.querySelectorAll('section.pane').forEach(s => s.hidden = s.id !== t);
-  if (t === 't1') { initMap(); setTimeout(() => map.invalidateSize(), 60); }
+  if (t === 't1') {
+    initMap();
+    if (map) setTimeout(() => map.invalidateSize(), 60);
+  }
   if (t === 't2') drawPosts();
   if (t === 't3') trends().catch(() => {});
   if (t === 't4') loadIdeas().catch(e => toast('⚠ ' + e.message));
@@ -318,6 +394,10 @@ const MAP_KEY = 'bmQgmz1GfGPIHPr7Dm0q';   // MapTiler key
 const MUMBAI = [19.076, 72.8777];
 function initMap() {
   if (map) return;
+  if (typeof L === 'undefined') {
+    console.warn('Leaflet did not load; map initialization will be retried later.');
+    return;
+  }
   map = L.map('map').setView(MUMBAI, 11);
   L.tileLayer(`https://api.maptiler.com/maps/streets-v2/{z}/{x}/{y}.png?key=${MAP_KEY}`,
     {tileSize:512, zoomOffset:-1, minZoom:1, maxZoom:20, crossOrigin:true, attribution:'© MapTiler © OpenStreetMap contributors'}).addTo(map);
@@ -406,12 +486,23 @@ async function scrape(c) {
 /* ---------- keywords ---------- */
 async function loadKw() {
   const k = await api(`/projects/${pid}/keywords/`);
-  $('#kws').innerHTML = k.map(x => `<i class="chip dark">${esc(x.text)}</i>`).join('') || '<span class="empty">None yet</span>';
+  focusKeywords = k.map(x => x.text).filter(Boolean);
+  const rows = k.map(x => `<i class="chip dark focus-chip">${esc(x.text)} <button type="button" title="Remove keyword" data-delkw="${x.id}">×</button></i>`).join('');
+  $('#kws').innerHTML = rows || '<span class="empty">None yet</span>';
 }
 $('#kwf').onsubmit = async e => {
   e.preventDefault(); const t = $('#kw').value.trim(); if (!t) return;
   try { await api(`/projects/${pid}/keywords/`, {method:'POST', body:JSON.stringify({text:t})}); $('#kw').value = ''; loadKw(); }
   catch (er) { toast('⚠ ' + er.message); }
+};
+$('#kws').onclick = async e => {
+  const b = e.target.closest('[data-delkw]');
+  if (!b) return;
+  try {
+    await api(`/projects/${pid}/keywords/${b.dataset.delkw}`, {method:'DELETE'});
+    await loadKw();
+    toast('Keyword removed ✓');
+  } catch (er) { toast('⚠ ' + er.message); }
 };
 
 /* ---------- posts ---------- */
@@ -441,10 +532,17 @@ function drawPosts() {
   $('#astat').textContent = posts.length ? `${posts.filter(p => p.topic).length} of ${posts.length} posts analyzed` : '';
   const L = posts.filter(p => (!c || p.competitor_id == c) && (!t || p.topic === t));
   $('#posts').innerHTML = L.length ? L.slice(0, 80).map(p => {
-    const kw = (p.keywords_detected || '').split(',').filter(k => k.trim()).map(k => `<span class="k">${esc(k.trim())}</span>`).join('');
+    const detectedKeywords = (p.keywords_detected || '').split(',').map(k => k.trim()).filter(Boolean);
+    const matchedFocus = focusKeywords.filter(fk => detectedKeywords.some(k => fk.toLowerCase() === k.toLowerCase() || fk.toLowerCase().includes(k.toLowerCase()) || k.toLowerCase().includes(fk.toLowerCase())));
+    const kw = detectedKeywords.map(k => {
+      const matched = matchedFocus.some(fk => k.toLowerCase() === fk.toLowerCase() || k.toLowerCase().includes(fk.toLowerCase()) || fk.toLowerCase().includes(k.toLowerCase()));
+      return matched
+        ? `<span class="k keyword-hit"><span class="keyword-hit-label">FOUND</span>${esc(k)}</span>`
+        : `<span class="k">${esc(k)}</span>`;
+    }).join('');
     const img = p.image_url ? `<a class="pside" href="${esc(p.image_url)}" target="_blank" rel="noopener"><img class="pimg" src="${esc(p.image_url)}" alt="Post image" loading="lazy" referrerpolicy="no-referrer" onload="fitImg(this)" onerror="this.parentElement.remove()"></a>` : '';
     const vid = !p.image_url && p.video_url ? `<div class="pside pvid"><video class="pvideo" src="${esc(p.video_url)}" controls playsinline preload="metadata" referrerpolicy="no-referrer" onerror="vidFail(this)"></video></div>` : '';
-    const ext = p.topic ? `<div class="pext"><div class="ptag">AI analysis</div><div class="pcols"><div><small>Topic</small><span class="k big">${esc(p.topic)}</span></div><div><small>Keywords</small>${kw || '<span class="k">none</span>'}</div></div></div>` : '';
+    const ext = (p.topic || detectedKeywords.length) ? `<div class="pext"><div class="ptag">AI analysis</div><div class="pcols"><div><small>Topic</small><span class="k big">${esc(p.topic)}</span></div><div><small>Keywords</small>${kw || '<span class="k">none</span>'}</div></div></div>` : '';
     return `<div class="pwrap${p.topic ? ' ana' : ''}"><article class="card pcard"><div class="pbody"><div><b>${esc(cn(p.competitor_id))}</b>${p.cta_text ? ` <i class="chip">Button: ${esc(p.cta_text)}</i>` : ''}</div><p class="txt">${esc(p.content)}</p>${postLink(p)}</div>${img}${vid}</article>${ext}</div>`;
   }).join('') + (L.length > 80 ? `<p class="empty">Showing 80 of ${L.length}. Use the filters to narrow down.</p>` : '')
     : '<p class="empty">No posts to show yet. Add a rival and press "Get their posts" first.</p>';
@@ -452,10 +550,84 @@ function drawPosts() {
 $('#fc').onchange = $('#ft').onchange = drawPosts;
 
 /* ---------- analysis + trends ---------- */
+let trendChart = null;
+let latestTrends = [];
 async function trends() {
   const t = await api(`/projects/${pid}/trends/`);
-  $('#trends').innerHTML = t.length ? t.map(x => `<div class="lab"><b>${esc(x.topic)}</b><span>${x.competitors_using} of ${x.total_competitors} rivals</span></div><div class="track"><i style="width:${Math.max(x.occurrence_pct, 4)}%"></i></div>`).join('')
-    : '<p class="empty">No trends yet. Go to "Read their posts" and press "Analyze all posts with AI" first.</p>';
+  latestTrends = t || [];
+  const wrap = $('#trendChartWrap');
+  const explainer = $('#trendExplainer');
+
+  if (trendChart) { trendChart.destroy(); trendChart = null; }
+
+  if (!t.length) {
+    wrap.innerHTML = '<p class="empty">No trends yet. Go to "Read their posts" and press "Analyze all posts with AI" first.</p>';
+    explainer.innerHTML = '';
+    renderIdeaStrategy([]);
+    return;
+  }
+
+  wrap.innerHTML = '<canvas id="trendChart"></canvas>';
+  wrap.style.height = Math.max(430, t.length * 46) + 'px';
+
+  if (typeof Chart === 'undefined') {
+    wrap.innerHTML = '<p class="empty">Chart library could not be loaded. Refresh the page and try again.</p>';
+    return;
+  }
+
+  trendChart = new Chart($('#trendChart'), {
+    type: 'bar',
+    data: {
+      labels: t.map(x => x.topic),
+      datasets: [{
+        label: 'Rival coverage',
+        data: t.map(x => x.occurrence_pct),
+        borderWidth: 2,
+        borderColor: '#111',
+        backgroundColor: '#d4ff3a',
+        borderRadius: 0,
+      }]
+    },
+    options: {
+      indexAxis: 'y',
+      responsive: true,
+      maintainAspectRatio: false,
+      plugins: {
+        legend: { display: false },
+        tooltip: { callbacks: { label: ctx => {
+          const x = t[ctx.dataIndex];
+          return `${x.competitors_using} of ${x.total_competitors} rivals (${x.occurrence_pct}%) · ${x.post_count} posts`;
+        }}}
+      },
+      scales: {
+        x: { min: 0, max: 100, ticks: { callback: value => value + '%' }, grid: { color: '#ddd' } },
+        y: { grid: { display: false }, ticks: { color: '#111', font: { weight: '700' } } }
+      }
+    }
+  });
+
+  const top = t[0];
+  explainer.innerHTML = `
+    <div class="trend-explainer">
+      <h3>How to read this</h3>
+      <p><b>Coverage, not raw post volume:</b> a 60% bar means 60% of the rivals you track have used that topic at least once. It does not mean 60% of all their posts are about it.</p>
+      <p><b>Why it matters for ideas:</b> the idea engine receives this same coverage ranking, then uses recency, keywords and source posts to decide how to remix the signal without copying it.</p>
+      <div class="trend-insight">
+        <div><b>${esc(top.topic)}</b><span>highest coverage topic</span></div>
+        <div><b>${top.occurrence_pct}%</b><span>${top.competitors_using} of ${top.total_competitors} rivals</span></div>
+        <div><b>${t.length}</b><span>topics detected</span></div>
+        <div><b>${t.reduce((sum,x) => sum + (x.post_count || 0), 0)}</b><span>topic-tagged posts</span></div>
+      </div>
+    </div>`;
+
+  renderIdeaStrategy(t);
+}
+function renderIdeaStrategy(t) {
+  $('#ideaTrendCount').textContent = t.length || '0';
+  const top = t.slice(0, 3);
+  $('#ideaStrategy').innerHTML = top.length
+    ? top.map((x, idx) => `<div class="idea-trend-chip">${idx + 1}. ${esc(x.topic)} <span>· ${x.occurrence_pct}% coverage · ${x.competitors_using}/${x.total_competitors} rivals</span></div>`).join('')
+    : '<span class="idea-strategy-loading">No trend signals yet. Analyze posts first.</span>';
 }
 $('#abtn').onclick = () => run($('#abtn'), 'AI is reading… (up to 2 min)', async () => {
   const r = await api(`/projects/${pid}/analyze/`, {method:'POST'});
@@ -464,10 +636,16 @@ $('#abtn').onclick = () => run($('#abtn'), 'AI is reading… (up to 2 min)', asy
 
 /* ---------- ideas (saved in the database) ---------- */
 let ideas = [];
+const imageGenerating = new Set();
 async function loadIdeas() {
   ideas = await api(`/projects/${pid}/ideas/`);
-  const d = t => { const m = (t || '').match(/^\[(\d{4}-\d{2}-\d{2})/); return m ? m[1] : '9999'; };
-  ideas.sort((a, b) => d(a.topic).localeCompare(d(b.topic)) || a.id - b.id);   // timeline: earliest post date first
+  if (!latestTrends.length) {
+    try { latestTrends = await api(`/projects/${pid}/trends/`); } catch (_) {}
+  }
+  renderIdeaStrategy(latestTrends);
+  // Newest generated idea first. The database ID increases with every new
+  // idea, so a freshly generated batch always appears at the top.
+  ideas.sort((a, b) => b.id - a.id);
   drawIdeas();
 }
 function drawIdeas() {
@@ -503,14 +681,15 @@ function drawIdeas() {
             <div class="idea-image-side">
               <div class="idea-image-placeholder">
                 <div class="image-icon">🖼️</div>
-                <span>No image generated yet</span>
+                <span>${imageGenerating.has(i.id) ? 'Generating image…' : 'No image generated yet'}</span>
 
+                ${imageGenerating.has(i.id) ? '' : `
                 <button
                   class="btn sm"
                   data-image="${i.id}"
                 >
                   Generate Image
-                </button>
+                </button>`}
               </div>
             </div>
           `;
@@ -546,6 +725,11 @@ function drawIdeas() {
 
               <div>
                 ${chips(i.keywords)}
+              </div>
+
+              <div class="idea-strategy">
+                <strong>Why this idea?</strong>
+                <span>${esc(i.strategy_reason || 'I used the main competitor trend and the upcoming calendar when planning this idea.')}</span>
               </div>
 
               <div style="margin-top:8px">
@@ -654,10 +838,38 @@ $('#ideas').onclick = e => {
     return;
   }
 };  
+async function generateImagesForNewIdeas(newIdeas) {
+  // The cards are rendered first, then image generation starts immediately.
+  // This lets the user see the new idea while its image is being created.
+  for (const idea of newIdeas) {
+    if (!idea?.id || idea.image_url || imageGenerating.has(idea.id)) continue;
+
+    imageGenerating.add(idea.id);
+    drawIdeas();
+
+    // Run each image request independently so one failed image does not stop
+    // the other newly generated ideas from receiving their images.
+    (async () => {
+      try {
+        await api(`/ideas/${idea.id}/generate-image/`, {method:'POST'});
+        toast(`Image ready for “${(idea.topic || 'new idea').replace(/^\[.*?\]\s*/, '')}” ✓`);
+      } catch (e) {
+        toast(`Image failed: ${e.message}`);
+      } finally {
+        imageGenerating.delete(idea.id);
+        await loadIdeas().catch(() => {});
+      }
+    })();
+  }
+}
+
 $('#gbtn').onclick = () => run($('#gbtn'), 'Thinking… (up to 2 min)', async () => {
-  await api(`/projects/${pid}/generate-ideas/`, {method:'POST', body:JSON.stringify({count:+$('#cnt').value})});
-  await loadIdeas(); dash(); toast('New ideas ready ✓');
-}, ['AI is writing post ideas', 'Studying rival posts and drafting your ideas.']);
+  const newIdeas = await api(`/projects/${pid}/generate-ideas/`, {method:'POST', body:JSON.stringify({count:+$('#cnt').value})});
+  await loadIdeas();
+  dash();
+  toast('New ideas ready — generating images…');
+  generateImagesForNewIdeas(newIdeas);
+}, ['AI is writing post ideas', 'Using Spot Trends coverage, detected competitor keywords, your focus keywords and the next 60 days of festival/occasion opportunities.']);
 
 /* ---------- start ---------- */
 show('t1');

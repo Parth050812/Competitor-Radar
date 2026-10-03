@@ -347,6 +347,10 @@ class GoogleUpdatesScraper:
         # cut short (watchdog / CAPTCHA) the caller can still keep what was
         # collected so far.
         self.collected: Dict[str, GooglePost] = {}
+        self.seen_post_ids: set[str] = set()
+        # Google can expose the same visible post under different IDs.
+        # Fingerprints stop those content-level duplicates.
+        self.collected_fingerprints: set[str] = set()
 
     # ------------------------------------------------------------------
     # basic helpers
@@ -796,70 +800,121 @@ class GoogleUpdatesScraper:
         return None
 
     def click_more_if_present(self, article):
-        """Expand this post. Google may re-render the article afterwards."""
+        """Expand the post body when Google has collapsed it behind More.
+
+        Google has used several DOM shapes for this control. We deliberately
+        search by visible text/ARIA instead of relying on one generated
+        jsname, then re-find the article after the click because Google often
+        replaces the node.
+        """
         selectors = [
             (By.XPATH, ".//*[@jsname='WUPT1e' and @role='button']"),
             (By.XPATH, ".//*[@role='button' and normalize-space()='More']"),
+            (By.XPATH, ".//button[normalize-space()='More']"),
+            (By.XPATH, ".//a[normalize-space()='More']"),
+            (By.XPATH, ".//*[@aria-label='More']"),
+            (By.XPATH, ".//*[@title='More']"),
+            (By.XPATH, ".//*[normalize-space()='More']"),
         ]
 
+        seen = set()
         for by, selector in selectors:
             try:
-                for button in article.find_elements(by, selector):
-                    try:
-                        if not self.visible(button):
-                            continue
-                        self.driver.execute_script(
-                            "arguments[0].scrollIntoView({block:'center',inline:'nearest'});",
-                            button,
-                        )
-                        self.sleep(0.25)
-                        try:
-                            button.click()
-                        except Exception:
-                            self.driver.execute_script("arguments[0].click();", button)
-                        self.sleep(0.8)
-                        return True
-                    except (StaleElementReferenceException, WebDriverException):
-                        continue
+                candidates = article.find_elements(by, selector)
             except Exception:
                 continue
+
+            for candidate in candidates:
+                try:
+                    if not self.visible(candidate):
+                        continue
+
+                    # If the text is inside a span/div, click its actual
+                    # button/link parent when one exists.
+                    clickable = self.driver.execute_script(
+                        """
+                        const e = arguments[0];
+                        return e.closest('button,[role=button],a') || e;
+                        """,
+                        candidate,
+                    )
+                    key = id(clickable)
+                    if key in seen:
+                        continue
+                    seen.add(key)
+
+                    before = self.safe_text(article)
+                    self.driver.execute_script(
+                        "arguments[0].scrollIntoView({block:'center',inline:'nearest'});",
+                        clickable,
+                    )
+                    self.sleep(0.2)
+
+                    try:
+                        clickable.click()
+                    except Exception:
+                        self.driver.execute_script("arguments[0].click();", clickable)
+
+                    # Wait briefly for Google's re-render/expanded text.
+                    deadline = time.time() + 2.0
+                    while time.time() < deadline:
+                        try:
+                            post_id = self.safe_attribute(article, "data-post-id")
+                            fresh = self.refind_post(post_id, attempts=1) if post_id else None
+                            if fresh is not None:
+                                article = fresh
+                            after = self.safe_text(article)
+                            if len(after) > len(before) or "More" not in after[-80:]:
+                                break
+                        except Exception:
+                            pass
+                        self.sleep(0.15)
+                    return True
+                except (StaleElementReferenceException, WebDriverException):
+                    continue
+                except Exception:
+                    continue
 
         return False
 
     def extract_content(self, article) -> Optional[str]:
-        """The actual post body, preferring Google's g3HNze node."""
-        try:
-            for element in article.find_elements(By.XPATH, ".//*[@jsname='g3HNze']"):
-                text = self.safe_text(element)
-                if text:
-                    return text
-        except Exception:
-            pass
+        """Return the fullest available post copy after any More expansion."""
+        candidates = []
 
-        try:
-            best_text = None
-            for element in article.find_elements(By.XPATH, ".//*[@data-post-id]"):
-                text = self.safe_text(element)
-                if text and len(text) >= 10:
-                    if best_text is None or len(text) > len(best_text):
-                        best_text = text
-            if best_text:
-                return best_text
-        except Exception:
-            pass
+        # Google has used both jsname and data-content-id for the body.
+        for selector in [
+            ".//*[@jsname='g3HNze']",
+            ".//*[@data-content-id]",
+        ]:
+            try:
+                for element in article.find_elements(By.XPATH, selector):
+                    text = self.safe_text(element)
+                    if text and len(text) >= 10:
+                        candidates.append(text)
+            except Exception:
+                continue
 
+        if candidates:
+            # The body node is normally the longest of these candidates.
+            return max(candidates, key=len)
+
+        # Fallback: collect visible text blocks, preferring the longest block
+        # that is not just a UI label. This catches cards whose body markup
+        # differs from the common Google structure.
         excluded = {"More", "Share", "Like", "Comment", "Copy link"}
         try:
-            best_text = None
-            for element in article.find_elements(By.XPATH, ".//span"):
+            blocks = []
+            for element in article.find_elements(By.XPATH, ".//*[self::span or self::div or self::p]"):
                 text = self.safe_text(element)
                 if not text or text in excluded or len(text) < 20:
                     continue
-                if best_text is None or len(text) > len(best_text):
-                    best_text = text
-            return best_text
+                blocks.append(text)
+            if blocks:
+                return max(blocks, key=len)
         except Exception:
-            return None
+            pass
+
+        return None
 
     def extract_image(self, article, restaurant: Optional[str] = None) -> Optional[str]:
         """
@@ -1070,6 +1125,21 @@ class GoogleUpdatesScraper:
     # PHASE 1 - capture a card's data
     # ------------------------------------------------------------------
 
+    @staticmethod
+    def _normalise_post_text(value: Optional[str]) -> str:
+        return re.sub(r"\s+", " ", (value or "").strip()).casefold()
+
+    def _post_fingerprint(self, post: GooglePost) -> str:
+        """Stable fingerprint of the visible post content, not Google's ID."""
+        parts = [
+            self._normalise_post_text(post.title),
+            self._normalise_post_text(post.validity),
+            self._normalise_post_text(post.content),
+        ]
+        text_key = "|".join(parts)
+        key = text_key if text_key.strip("|") else (post.image_url or post.video_url or "")
+        return hashlib.md5(key.encode("utf-8")).hexdigest()
+
     def capture_post_data(self, article) -> Optional[GooglePost]:
         """Reads everything present in the card. Never opens Share."""
         post_id = None
@@ -1132,55 +1202,61 @@ class GoogleUpdatesScraper:
             return None
 
     def collect_current_posts(self, supplied_posts=None):
-        """
-        Capture every not-yet-collected card in the DOM without losing the
-        batch if Google swaps the DOM between two Selenium queries.
-        """
+        """Capture only genuinely new IDs/content from the currently rendered cards."""
         posts = supplied_posts if supplied_posts is not None else self.get_posts()
         if not posts:
-            return
+            return 0
 
         post_ids = []
         for article in posts:
             post_id = self.safe_attribute(article, "data-post-id")
-            if post_id:
+            if post_id and post_id not in post_ids:
                 post_ids.append(post_id)
 
+        added = 0
         for post_id in post_ids:
-            if post_id in self.collected:
+            # Google keeps the same DOM cards around for many scroll passes.
+            # Do not re-open/re-extract an already seen ID. This is what was
+            # causing the repeated "Skipping repeated post" loop.
+            if post_id in self.seen_post_ids:
+                continue
+            self.seen_post_ids.add(post_id)
+
+            article = next(
+                (candidate for candidate in posts
+                 if self.safe_attribute(candidate, "data-post-id") == post_id),
+                None,
+            )
+            if article is None:
+                article = self.refind_post(post_id)
+            if article is None:
                 continue
 
             captured = None
-
-            for _ in range(3):
-                article = None
-
-                # Prefer the exact node we already detected...
-                for candidate in posts:
-                    if self.safe_attribute(candidate, "data-post-id") == post_id:
-                        article = candidate
-                        break
-
-                # ...and fall back to a fresh lookup if Google re-rendered it.
-                if article is None:
-                    article = self.refind_post(post_id)
-
-                if article is None:
-                    self.sleep(0.25)
-                    continue
-
+            for attempt in range(2):
                 try:
                     captured = self.capture_post_data(article)
                     if captured is not None:
                         break
                 except Exception:
                     pass
+                if attempt == 0:
+                    article = self.refind_post(post_id)
 
-                self.sleep(0.35)
+            if captured is None:
+                continue
 
-            if captured is not None:
-                self.collected[post_id] = captured
-                print(f"    Captured post {len(self.collected):02d}: {post_id}")
+            fingerprint = self._post_fingerprint(captured)
+            if fingerprint in self.collected_fingerprints:
+                print(f"    Skipping duplicate content: {post_id}")
+                continue
+
+            self.collected[post_id] = captured
+            self.collected_fingerprints.add(fingerprint)
+            added += 1
+            print(f"    Captured post {len(self.collected_fingerprints):02d}: {post_id}")
+
+        return added
 
     def _scroll_metrics(self, container):
         return self.driver.execute_script(
@@ -1189,19 +1265,16 @@ class GoogleUpdatesScraper:
         )
 
     def scroll_all_posts(self) -> Dict[str, GooglePost]:
-        """PHASE 1: scroll the popup, capturing cards as they render."""
+        """Scroll until Google stops revealing new cards, with hard progress guards."""
         print("[*] Loading all available posts...")
 
         initial_posts = self.wait_for_post_cards(timeout=12)
-
         if initial_posts:
             print(f"[*] Initial post cards detected: {len(initial_posts)}")
-            # Capture the nodes we just detected BEFORE any new DOM query.
             self.collect_current_posts(initial_posts)
         else:
             print("[!] No article[data-post-id] cards yet. Waiting once more...")
             self.sleep(2)
-            self.get_posts()
 
         container = None
         for _ in range(10):
@@ -1216,66 +1289,74 @@ class GoogleUpdatesScraper:
             return self.collected
 
         deadline = time.monotonic() + SCROLL_WALL_CLOCK_BUDGET
+        stalled_rounds = 0
+        last_top = -1
+        last_height = -1
 
         for round_number in range(1, MAX_SCROLL_ROUNDS + 1):
-
             if time.monotonic() > deadline:
                 print(f"[!] Scroll budget of {SCROLL_WALL_CLOCK_BUDGET}s reached - stopping.")
                 break
 
-            # Google can replace the scroll element after lazy rendering.
             fresh_container = self.find_scroll_container()
             if fresh_container is not None:
                 container = fresh_container
 
-            # Capture BEFORE moving the scroll position.
+            before_count = len(self.collected_fingerprints)
             self.collect_current_posts(self.get_posts())
 
             try:
-                _, scroll_height, client_height = self._scroll_metrics(container)
+                top, height, client = self._scroll_metrics(container)
+                if height <= client:
+                    print("[*] Updates list is not scrollable. Finished.")
+                    break
 
                 self.driver.execute_script(
                     "arguments[0].scrollTop = arguments[0].scrollHeight;", container
                 )
                 self.sleep(SCROLL_PAUSE)
 
-                after_top = self._scroll_metrics(container)[0]
-
-                # Capture newly rendered cards AFTER scrolling.
+                # Google may replace the scroll container after lazy rendering.
+                fresh_container = self.find_scroll_container()
+                if fresh_container is not None:
+                    container = fresh_container
+                after_top, after_height, after_client = self._scroll_metrics(container)
                 self.collect_current_posts(self.get_posts())
+                after_count = len(self.collected_fingerprints)
 
                 print(
-                    f"    Scroll {round_number:02d} | posts={len(self.collected)} | "
-                    f"top={int(after_top)} | height={int(scroll_height)}"
+                    f"    Scroll {round_number:02d} | posts={after_count} | "
+                    f"top={int(after_top)} | height={int(after_height)}"
                 )
+
+                made_progress = (after_count > before_count or
+                                 after_top > last_top + 2 or
+                                 after_height > last_height + 2)
+                at_bottom = after_top + after_client >= after_height - 10
+
+                if made_progress:
+                    stalled_rounds = 0
+                else:
+                    stalled_rounds += 1
+
+                last_top, last_height = after_top, after_height
+
+                # Once we're at the bottom and two consecutive passes reveal
+                # neither new content nor a larger list, there is nothing more
+                # to lazy-load. Never keep looping over the same cards.
+                if at_bottom and stalled_rounds >= 2:
+                    print("[*] Reached bottom with no new posts. Finished.")
+                    break
+
+                if stalled_rounds >= 3:
+                    print("[*] Scroll position/content stopped changing. Finished.")
+                    break
+
             except Exception as exc:
                 print(f"    Scroll error: {exc}")
                 break
 
-            at_bottom = after_top + client_height >= scroll_height - 10
-
-            if at_bottom:
-                # One last lazy-render pass at the bottom.
-                self.sleep(1.5)
-                self.collect_current_posts(self.get_posts())
-
-                # Lazy rendering can grow the popup, so re-measure.
-                try:
-                    final_top, final_height, final_client = self._scroll_metrics(container)
-                    final_at_bottom = final_top + final_client >= final_height - 10
-                except Exception:
-                    final_at_bottom = True
-
-                if final_at_bottom:
-                    before_final = len(self.collected)
-                    self.sleep(0.8)
-                    self.collect_current_posts(self.get_posts())
-
-                    if len(self.collected) == before_final:
-                        print("[*] Reached bottom and no new posts detected.")
-                        break
-
-        print(f"[+] Finished loading posts. Total unique posts: {len(self.collected)}")
+        print(f"[+] Finished loading posts. Total unique posts: {len(self.collected_fingerprints)}")
         return self.collected
 
     def scroll_using_javascript(self):
@@ -1556,31 +1637,43 @@ class GoogleUpdatesScraper:
 # Converting scraped posts into the dict shape main.py stores
 # =====================================================================
 
-def _make_content_hash(competitor_name: str, post: GooglePost) -> str:
-    """
-    Unique key for ScrapedPost.content_hash.
+def _normalise_post_text(value: Optional[str]) -> str:
+    return re.sub(r"\s+", " ", (value or "").strip()).casefold()
 
-    Google's post_id is stable and unique per post, so it is the best key.
-    (Content alone is NOT safe: the same text is often posted several times
-    with different images, which would collide on the DB's unique index.)
-    """
-    if post.post_id:
-        key = f"{competitor_name}|{post.post_id}"
-    else:
-        key = f"{competitor_name}|{post.date}|{post.title}|{post.content}|{post.image_url}"
+
+def _post_content_fingerprint(post: GooglePost) -> str:
+    """Hash the actual post copy so a new Google ID cannot create a duplicate row."""
+    text_key = "|".join([
+        _normalise_post_text(post.title),
+        _normalise_post_text(post.validity),
+        _normalise_post_text(post.content),
+    ])
+    key = text_key if text_key.strip("|") else (post.image_url or post.video_url or "")
+    return hashlib.md5(key.encode("utf-8")).hexdigest()
+
+
+def _make_content_hash(competitor_name: str, post: GooglePost) -> str:
+    # Include the competitor, but deliberately do not include Google's post ID.
+    # The same visible post can appear with a different transient ID.
+    key = f"{_normalise_post_text(competitor_name)}|{_post_content_fingerprint(post)}"
     return hashlib.md5(key.encode("utf-8")).hexdigest()
 
 
 def _to_db_posts(competitor_name: str, gposts: List[GooglePost]) -> List[Dict[str, Any]]:
     posts = []
+    seen_hashes = set()
 
     for p in gposts:
         content = (p.content or "").strip()
         title = (p.title or "").strip() or None
 
-        # Nothing useful in this card at all - don't store an empty row.
         if not content and not title and not p.image_url and not p.video_url:
             continue
+
+        content_hash = _make_content_hash(competitor_name, p)
+        if content_hash in seen_hashes:
+            continue
+        seen_hashes.add(content_hash)
 
         posts.append({
             "date": p.date or "",
@@ -1594,7 +1687,7 @@ def _to_db_posts(competitor_name: str, gposts: List[GooglePost]) -> List[Dict[st
             "post_id": p.post_id,
             "feature_id": p.feature_id,
             "content_id": p.content_id,
-            "content_hash": _make_content_hash(competitor_name, p),
+            "content_hash": content_hash,
         })
 
     return posts

@@ -144,13 +144,15 @@ class AnalysisResult(BaseModel):
 
 class IdeaItem(BaseModel):
     idea_type: str = Field(description="Exactly 'trend_remix' or 'fresh'.")
+    source_trend: str = Field(description="For trend_remix, the exact trending topic label supplied in the trend analysis. For fresh, use 'None'.")
     occasion: str = Field(description="Festival/occasion this idea is tied to, or 'Evergreen' if none.")
     suggested_post_date: str = Field(description="Best date to publish, format YYYY-MM-DD.")
     topic: str = Field(description="Core headline or topic of the post.")
-    draft_copy: str = Field(description="Ready-to-publish Google Maps update copy, with emojis.")
+    draft_copy: str = Field(description="Ready-to-publish Google Maps update copy, with emojis. Naturally mention the exact business name once when it fits, so the user can paste the copy directly.")
     cta_suggested: str = Field(description="Google Maps CTA label, e.g. 'Book', 'Call now', 'Learn more', 'Order online'.")
-    image_concept: str = Field(description="Short description of the picture or graphic to use.")
+    image_concept: str = Field(description="Concrete, self-contained visual direction that MUST match the draft copy: exact hero subject, setting, people/hands if needed, composition, and important visual details. Never suggest an unrelated generic food scene.")
     keywords: List[str] = Field(description="2 to 4 target keywords used in the idea.")
+    focus_keywords_used: List[str] = Field(default_factory=list, description="Exact user focus keywords that this idea is built around. If focus keywords are supplied, include at least one relevant exact focus keyword here.")
 
 
 class IdeasResult(BaseModel):
@@ -571,6 +573,18 @@ def _post_date(content: str) -> Optional[date]:
         return None
 
 
+def _coerce_post_date(value: Any, content: str = "") -> Optional[date]:
+    """Prefer the DB's published_date, then fall back to a date embedded in content."""
+    raw = str(value or "").strip()
+    if raw:
+        for fmt in ("%Y-%m-%d", "%d-%m-%Y", "%d/%m/%Y", "%b %d, %Y", "%B %d, %Y"):
+            try:
+                return datetime.strptime(raw, fmt).date()
+            except ValueError:
+                pass
+    return _post_date(content)
+
+
 def _strip_date(content: str) -> str:
     return DATE_RE.sub("", content or "", count=1).strip()
 
@@ -582,28 +596,34 @@ def _recency_weight(post_date: Optional[date], today: date) -> float:
     return 0.5 ** (age_days / RECENCY_HALF_LIFE_DAYS)
 
 
-def _find_trends(posts: List[Dict[str, Any]], today: date):
+def find_trends(posts: List[Dict[str, Any]], today: Optional[date] = None):
     """
-    Plain Python, no AI:
-      1. group posts by topic
-      2. score each topic = sum of post weights (newer posts weigh more)
-      3. for the top topics, find their keywords and pick the newest raw posts
-    Returns (trend_groups, topic_counts, keyword_counts).
+    Shared deterministic trend analysis used by both the Spot Trends chart and
+    idea generation. The important rule is that topic coverage across rivals is
+    the primary trend signal; recency/post volume are supporting signals.
+
+    Each post may contain competitor_id and published_date. If published_date is
+    missing, the date embedded in the post text is used as a fallback.
+
+    Returns:
+      trend_rows: every analyzed topic with chart-ready coverage metrics
+      groups: top topics plus source posts/keywords for the AI idea prompt
+      topic_counts: raw post counts
+      keyword_counts: overall keyword counts
     """
+    today = today or date.today()
     items = []
     for p in posts:
         content = p.get("content") or ""
-        post_date = _post_date(content)
+        post_date = _coerce_post_date(p.get("published_date"), content)
         items.append({
             "content": content,
             "topic": (p.get("topic") or "").strip(),
             "keywords": _keyword_list(p.get("keywords")),
             "date": post_date,
             "weight": _recency_weight(post_date, today),
+            "competitor_id": p.get("competitor_id"),
         })
-
-    if items and not any(i["date"] for i in items):
-        print("[AI] no post dates found in the content, ranking topics by post count only")
 
     by_topic: Dict[str, List[Dict[str, Any]]] = {}
     labels: Dict[str, Counter] = {}
@@ -621,36 +641,73 @@ def _find_trends(posts: List[Dict[str, Any]], today: date):
     def label(key: str) -> str:
         return labels[key].most_common(1)[0][0]
 
-    ranked = sorted(by_topic.items(), key=lambda kv: sum(i["weight"] for i in kv[1]), reverse=True)
-    top = [kv for kv in ranked if len(kv[1]) >= MIN_TOPIC_POSTS][:TOP_TOPICS]
-    if not top and ranked:
-        top = ranked[:1]  # tiny data set: still use the single best topic
+    # Coverage is the same metric rendered by Spot Trends. A topic used by
+    # 4 of 5 tracked rivals is therefore ahead of one used by 2 of 5, even
+    # if the latter has a few more posts. Recency breaks ties.
+    competitor_ids = {p.get("competitor_id") for p in items if p.get("competitor_id") is not None}
+    total_competitors = max(len(competitor_ids), 1)
+
+    ranked = []
+    for key, topic_items in by_topic.items():
+        comp_ids = {i["competitor_id"] for i in topic_items if i.get("competitor_id") is not None}
+        coverage_pct = round(len(comp_ids) / total_competitors * 100, 1) if comp_ids else 0.0
+        recency_score = round(sum(i["weight"] for i in topic_items), 2)
+        ranked.append((key, topic_items, len(comp_ids), coverage_pct, recency_score))
+
+    ranked.sort(key=lambda row: (-row[3], -row[4], -len(row[1]), label(row[0]).lower()))
+
+    trend_rows = []
+    for key, topic_items, comp_count, coverage_pct, recency_score in ranked:
+        dated = [i["date"] for i in topic_items if i["date"]]
+        trend_rows.append({
+            "topic": label(key),
+            "competitors_using": comp_count,
+            "total_competitors": total_competitors,
+            "occurrence_pct": coverage_pct,
+            "post_count": len(topic_items),
+            "recency_score": recency_score,
+            "latest_post_date": str(max(dated)) if dated else None,
+        })
+
+    # Only topics with repeated evidence feed the trend-remix ideas. For tiny
+    # datasets, still expose the strongest single topic so the feature remains useful.
+    eligible = [row for row in ranked if len(row[1]) >= MIN_TOPIC_POSTS]
+    if not eligible and ranked:
+        eligible = ranked[:1]
+    top = eligible[:TOP_TOPICS]
 
     groups = []
-    for key, topic_items in top:
+    for key, topic_items, comp_count, coverage_pct, recency_score in top:
         kw_scores: Counter = Counter()
         for i in topic_items:
             for kw in set(i["keywords"]):
                 if len(kw) >= 3:
                     kw_scores[kw] += i["weight"]
 
-        if any(i["date"] for i in topic_items):
-            newest = sorted(topic_items, key=lambda i: i["date"] or date.min, reverse=True)[:MAX_SOURCE_POSTS]
-        else:
-            newest = list(reversed(topic_items[-MAX_SOURCE_POSTS:]))  # DB order: last = newest
-
+        newest = sorted(
+            topic_items,
+            key=lambda i: i["date"] or date.min,
+            reverse=True,
+        )[:MAX_SOURCE_POSTS]
         dated = [i["date"] for i in topic_items if i["date"]]
         groups.append({
             "trending_topic": label(key),
+            "competitors_using": comp_count,
+            "total_competitors": total_competitors,
+            "coverage_pct": coverage_pct,
             "posts_in_topic": len(topic_items),
-            "trend_score": round(sum(i["weight"] for i in topic_items), 2),
+            "trend_score": coverage_pct,
+            "recency_score": recency_score,
             "latest_post_date": str(max(dated)) if dated else None,
             "top_keywords": [kw for kw, _ in kw_scores.most_common(KEYWORDS_PER_TOPIC)],
             "source_posts_newest_first": [_strip_date(i["content"])[:SOURCE_POST_CHARS] for i in newest],
         })
 
-    topic_counts = {label(key): len(v) for key, v in sorted(by_topic.items(), key=lambda kv: -len(kv[1]))[:10]}
-    return groups, topic_counts, dict(keyword_counts.most_common(15))
+    topic_counts = {
+        label(key): len(v)
+        for key, v in sorted(by_topic.items(), key=lambda kv: -len(kv[1]))[:10]
+    }
+    return trend_rows, groups, topic_counts, dict(keyword_counts.most_common(15))
 
 
 def _idea_label(idea: Dict[str, Any]) -> str:
@@ -668,6 +725,7 @@ def generate_ideas(
     count: int = 5,
     avoid_topics: Optional[List[str]] = None,
     business_name: Optional[str] = None,
+    focus_keywords: Optional[List[str]] = None,
     festivals: Optional[List[Dict[str, str]]] = None,
     region: str = "India",
     days_ahead: int = 60,
@@ -677,7 +735,8 @@ def generate_ideas(
            [{"content": p.content, "topic": p.topic, "keywords": p.keywords_detected}, ...]
 
     Pipeline (one AI call):
-      1. Rank topics by number of posts, newer posts counting more (plain Python).
+      1. Use the same competitor-coverage trend analysis shown by Spot Trends;
+         recency and post volume break ties (plain Python).
       2. ~60% of the ideas: rework the newest raw posts of the trending topics (and their
          top keywords) into NEW, unique posts.
       3. ~40% of the ideas: completely fresh angles competitors are not using.
@@ -692,7 +751,10 @@ def generate_ideas(
     today = date.today()
     end = today + timedelta(days=days_ahead)
 
-    groups, topic_counts, keyword_counts = _find_trends(posts, today)
+    trend_rows, groups, topic_counts, keyword_counts = find_trends(posts, today)
+
+    focus_keywords = [str(k).strip() for k in (focus_keywords or []) if str(k).strip()]
+    focus_text = ", ".join(focus_keywords) if focus_keywords else "None set"
 
     if groups:
         n_trend = min(count, max(1, round(count * TREND_SHARE)))
@@ -714,18 +776,22 @@ def generate_ideas(
     if n_trend:
         part_a = f"""
 PART A - TREND REMIX: create exactly {n_trend} ideas with idea_type "trend_remix".
-Below are the topics competitors post about most. They are ranked by trend_score, which counts
-how many posts use the topic and gives newer posts more weight, so the first topic is the hottest right now.
-Take a trending topic and rework one of its source posts into a NEW post for our business.
-Spread the ideas across the topics and give more ideas to the hottest topic. Use each topic's
+These are the EXACT topics shown in the Spot Trends chart. They are ranked primarily by
+competitor coverage (competitors_using / total_competitors), with recency and post volume as tie-breakers.
+For every trend_remix idea, set source_trend to the exact "trending_topic" label from the data below.
+Take that trending topic and rework one of its source posts into a NEW post for our business.
+Spread the ideas across the topics and give more ideas to the topics with higher coverage. Use each topic's
 top_keywords as the flavor of the idea.
 - Keep what works (the kind of offer, the hook, the structure) but rewrite everything in new words.
 - Never copy sentences, names, prices or distinctive phrases from the source posts.
 - Add a clear unique twist competitors are not using: a fresh hook, a different audience
   (families, office groups, couples...), a signature detail, a time-limited element or a festival tie-in.
 
-TRENDING TOPICS AND THEIR NEWEST POSTS:
+SPOT TRENDS DATA (this is the same analysis rendered in the dashboard chart):
 {json.dumps(groups, ensure_ascii=False, indent=2)}
+
+ALL CHART TREND ROWS:
+{json.dumps(trend_rows, ensure_ascii=False, indent=2)}
 """
 
     part_b = ""
@@ -744,6 +810,7 @@ a specific audience, a new experience.
 You are a local business marketing strategy engine for Google Maps update posts.
 
 OUR BUSINESS: {business_name or "a local business"}
+OUR FOCUS KEYWORDS: {focus_text}
 Today's date: {today}
 Planning window: {today} to {end}
 
@@ -752,6 +819,8 @@ Planning window: {today} to {end}
 Create {count} post ideas in total, in the parts below. Set idea_type on every idea.
 {part_a}{part_b}
 RULES FOR ALL IDEAS:
+- For trend_remix, source_trend MUST exactly match one of the supplied trending_topic labels.
+- For fresh ideas, source_trend MUST be "None".
 - Give every idea a suggested_post_date inside the planning window (YYYY-MM-DD). Tie ideas to the
   upcoming festivals/occasions where it fits and post a few days BEFORE the occasion.
   Use 'Evergreen' as the occasion for ideas not tied to a date.
@@ -759,6 +828,14 @@ RULES FOR ALL IDEAS:
 - Use realistic Google Maps CTA labels and give clear image direction.
 - Do not invent facts about our business (prices, timings, dish names, addresses).
   Where a specific detail is needed, write a [PLACEHOLDER] instead.
+- The exact business name is **{business_name or "a local business"}**. Naturally mention that exact name once in each draft_copy when it fits, so the user can copy the post directly. Do not repeat it unnaturally.
+- YOUR FOCUS KEYWORDS ARE A REQUIRED INPUT, NOT A SUGGESTION. If one or more focus keywords are supplied, EVERY idea must be built around at least one of them. Do not generate an unrelated idea just because a competitor trend is available.
+- The focus keyword controls the subject of the idea. Example: if the focus keyword is "gift card", the idea must actually be about gift cards (not sandwiches, buffets, or behind-the-scenes content). If it is "food festival", the idea must actually be about a food-festival/food-event angle.
+- For every idea, set focus_keywords_used to the exact focus keyword(s) that drive the idea. Use the exact phrase naturally in the draft_copy and include it in the target keywords.
+- Never output a generic idea and merely add the focus keyword as a tag. The post topic, draft copy, CTA and image concept must all support the chosen focus keyword.
+- If multiple focus keywords are supplied, distribute ideas across them when possible.
+- Competitor topics and keywords are supporting inspiration only. The user's focus keywords determine the subject/angle of the idea.
+- image_concept is a hard visual instruction. It MUST describe the same subject and message as draft_copy. If the post is about sandwich making, the image concept must explicitly be about sandwich making; never substitute a generic food festival, buffet, gift-card, or unrelated scene.
 """
 
     result = _call_ai(prompt, IdeasResult, temperature=0.7)
@@ -770,13 +847,30 @@ RULES FOR ALL IDEAS:
 
     ideas.sort(key=lambda i: i["suggested_post_date"])
 
+    # Make the generated copy immediately pasteable. The prompt asks the model
+    # to mention the business name, but enforce it here as a safety net so a
+    # missed instruction never produces copy with the wrong/absent brand.
+    brand = (business_name or "").strip()
+    if brand:
+        for idea in ideas:
+            copy = (idea.get("draft_copy") or "").strip()
+            if brand.casefold() not in copy.casefold():
+                idea["draft_copy"] = f"{brand}: {copy}" if copy else brand
+
     return [
         {
             "topic": _idea_label(i),
             "draft_copy": i["draft_copy"],
+            "source_trend": i.get("source_trend", "None"),
+            "focus_keywords_used": [
+                fk for fk in focus_keywords
+                if any(fk.casefold() in str(k).casefold() or str(k).casefold() in fk.casefold() for k in i.get("keywords", []))
+                or fk.casefold() in str(i.get("draft_copy", "")).casefold()
+            ],
             "cta_suggested": i["cta_suggested"],
             "image_concept": i["image_concept"],
             "keywords": i["keywords"],
+            "focus_keywords_used": i.get("focus_keywords_used", []),
             # extra keys, main.py ignores them today but they're there if you add columns later
             "idea_type": i["idea_type"],
             "occasion": i["occasion"],
@@ -847,177 +941,58 @@ def generate_image(
     context = "\n".join(line for line in context_lines if line)
 
     prompt = f"""
-  Create ONE premium, finished advertising photograph for a local business.
-  
-  This is a PROFESSIONAL COMMERCIAL ADVERTISEMENT, not a flyer, poster,
-  social-media template, collage, or generic AI artwork.
-  
-  POST CONTEXT:
-  {context}
-  
-  BUSINESS / BRAND:
-  {business_name}
-  
-  IMPORTANT CREATIVE DIRECTION:
-  The PRODUCT / FOOD / SERVICE must be the absolute hero of the image.
-  
-  Think like a world-class food advertising photographer and creative director.
-  
-  The viewer should immediately look at the product first.
-  
-  COMPOSITION:
-  - Make the main product the largest and most visually important element.
-  - Product should occupy roughly 60–75% of the visual attention.
-  - Put the product prominently in the center or slightly below center.
-  - Use an intentional hero-product composition.
-  - Show realistic texture, crisp edges, appetizing detail, natural imperfections,
-    realistic ingredients, realistic surfaces and believable lighting.
-  - Use cinematic commercial photography rather than an "AI art" appearance.
-  - Use depth of field carefully: the PRODUCT must remain sharp and detailed.
-  - Background can have tasteful depth and atmosphere, but must never compete
-    with the product.
-  - Avoid excessive blur.
-  - Avoid excessive bokeh.
-  - Avoid oversaturated colors.
-  - Avoid plastic-looking food.
-  - Avoid surreal lighting.
-  - Avoid floating objects or physically impossible food.
-  - Make the scene feel like a real professional advertising photoshoot.
-  
-  LIGHTING:
-  - Premium commercial food photography.
-  - Cinematic but believable lighting.
-  - Beautiful directional key light on the product.
-  - Natural highlights and realistic shadows.
-  - Subtle warm atmosphere where appropriate.
-  - Rich but realistic colors.
-  - Detailed food texture.
-  - High dynamic range.
-  - Professional editorial color grading.
-  - Photorealistic camera rendering.
-  - Real lens characteristics.
-  - No obvious AI artifacts.
-  
-  VISUAL STYLE:
-  Think:
-  premium restaurant campaign,
-  high-end food commercial,
-  modern brand advertising,
-  editorial food photography,
-  cinematic product photography.
-  
-  The final image should look like something a major consumer brand
-  could actually publish as a campaign advertisement.
-  
-  TEXT DESIGN:
-  DO NOT place the post title or topic as a giant headline.
-  
-  DO NOT render:
-  "{headline}"
-  
-  Instead, create ONE short, catchy BRAND TAGLINE inspired by the post context.
-  
-  The tagline should feel like memorable advertising copy:
-  short,
-  playful,
-  confident,
-  rhythmic,
-  easy to remember,
-  and emotionally connected to the product.
-  
-  Examples of the STYLE of tagline:
-  "Made to Make You Smile"
-  "Good Food. Great Moments."
-  "Bring Your Appetite."
-  "Made Fresh. Made Happy."
-  "Gather. Eat. Repeat."
-  
-  Do NOT copy these examples literally unless they naturally fit.
-  
-  Create a NEW tagline based on the actual post context.
-  
-  TYPOGRAPHY:
-  - The tagline should use a bold, expressive, funky advertising type style.
-  - Think modern brand campaign typography rather than a boring default font.
-  - Use playful letterforms, confident weight, tasteful personality and strong
-    visual rhythm.
-  - The typography should feel intentionally designed by a professional
-    graphic designer.
-  - Do not use generic Arial/Helvetica-style plain text.
-  - Do not use a corporate presentation font.
-  - Do not use huge block text covering the product.
-  - Keep the tagline relatively small compared with the hero product.
-  - Place the tagline ABOVE the hero product, with generous breathing room.
-  - Make sure the tagline is clearly readable but subordinate to the product.
-  - Never place text directly across the most important part of the food.
-  
-  BRAND NAME:
-  At the bottom of the advertisement, add the business/brand name:
-  
-  "{business_name}"
-  
-  Treat this like a premium brand signature.
-  
-  The brand name should be smaller than the product and visually refined.
-  It can sit beneath the product with clean spacing and subtle styling.
-  
-  TEXT HIERARCHY:
-  1. HERO PRODUCT — overwhelmingly dominant
-  2. SHORT FUNKY TAGLINE — secondary
-  3. BRAND NAME — small signature at the bottom
-  
-  The advertisement should still look beautiful even if the viewer ignores
-  all the text.
-  
-  LAYOUT:
-  - Clean premium composition.
-  - Strong visual hierarchy.
-  - Generous negative space around typography.
-  - No giant title.
-  - No paragraph text.
-  - No bullet points.
-  - No captions.
-  - No fake promotional copy.
-  - No unnecessary decorative elements.
-  - No collage.
-  - No multiple panels.
-  - No UI.
-  - No poster template.
-  - No borders.
-  
-  FACTUAL SAFETY:
-  Only use information explicitly supported by the post context.
-  Do not invent:
-  prices,
-  discounts,
-  offers,
-  addresses,
-  phone numbers,
-  opening hours,
-  awards,
-  ingredients,
-  claims,
-  locations,
-  or product names.
-  
-  Do not invent a logo.
-  Do not create fake brand marks.
-  
-  FINAL QUALITY:
-  The final result should look like a REAL photograph from a premium
-  commercial advertising campaign, not an AI-generated illustration.
-  
-  The product must be irresistibly appetizing, physically believable,
-  highly detailed and the unmistakable center of attention.
-  
-  OUTPUT:
-  ONE finished advertising image.
-  Premium commercial photography.
-  Clean composition.
-  Photorealistic.
-  Cinematic.
-  Brand-ready.
-  """
+Create ONE finished photorealistic commercial advertising image.
+
+HARD REQUIREMENT — MATCH THE POST EXACTLY
+The EXACT IMAGE CONCEPT below is the visual brief. Follow it literally.
+Do not reinterpret it into a generic food advertisement.
+
+BUSINESS NAME: {business_name or "Local Business"}
+POST TOPIC: {headline or topic}
+POST COPY: {draft_copy.strip() if draft_copy else ""}
+CTA: {cta_suggested.strip() if cta_suggested else ""}
+EXACT IMAGE CONCEPT: {image_concept.strip()}
+
+SCENE RULES:
+- The hero subject in EXACT IMAGE CONCEPT must be the main subject of the image.
+- The scene must directly illustrate the POST COPY.
+- Preserve the requested food/service, people or hands, setting, ingredients,
+  props and composition when they are specified.
+- If the concept says "hands assembling a sandwich", the image MUST visibly show
+  hands assembling a sandwich with the requested ingredients.
+- If the concept says catering, show catering.
+- If the concept says a specific dish, show that dish.
+- Do not replace the requested scene with a buffet, festival, gift card,
+  restaurant interior, generic platter, or random food photography.
+- Do not invent an unrelated occasion or promotion.
+- Do not let the tagline or business name change the visual subject.
+
+PHOTOGRAPHY:
+- Premium real-world commercial photography.
+- Photorealistic, believable proportions and materials.
+- Main subject sharp, detailed and visually dominant.
+- Natural commercial lighting and realistic shadows.
+- Tasteful depth of field; supporting background may be softer but the hero subject
+  must remain clear.
+- No surreal objects, floating food, impossible hands, random props, collage,
+  poster template, UI, borders or multiple panels.
+
+TEXT:
+- Do not render the full post copy.
+- If text is used, create ONE short tagline derived from the actual POST COPY.
+- Keep the tagline secondary to the visual.
+- At the bottom, add the exact business name: "{business_name or "Local Business"}".
+- Never use an unrelated slogan.
+
+FACTUAL RULE:
+Only show facts, products, offers, ingredients, locations or occasions that are
+supported by the POST COPY or EXACT IMAGE CONCEPT.
+
+FINAL OUTPUT:
+ONE brand-ready advertising image whose visual content clearly matches the exact
+image concept and post. The viewer should immediately understand what the post
+is advertising.
+"""
 
     try:
         print(
