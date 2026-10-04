@@ -125,16 +125,19 @@ PNG versions of the architecture, ER diagram and flowcharts are in `diagrams/`.
 
 ```
 Competitor-Radar/
-|-- main.py            FastAPI app: routes, background worker, dedup, dashboard
-|-- scraper.py         Selenium Google Maps Updates scraper + CAPTCHA wait loop
-|-- ai_providers.py    Gemini + Hugging Face integration, trend engine
-|-- models.py          SQLModel tables and response models
-|-- frontend.html      Single-page web interface (served at "/")
-|-- database.db        SQLite database (contains the demo dataset)
-|-- pyproject.toml     Dependencies          |-- uv.lock   Locked versions
-|-- .python-version    3.12
-|-- .env.example       Template for your keys (copy to .env)
-|-- logo.png, LICENSE, README.md
+├── .env.example          # Template for environment variables (copy to .env)
+├── .python-version       # Python version specification (3.12)
+├── ai_providers.py       # Gemini + Hugging Face integration, trend engine
+├── database.db           # SQLite database (contains the demo dataset)
+├── frontend.html         # Single-page web interface (served at "/")
+├── LICENSE               # Project license
+├── logo.png              # Project branding asset
+├── main.py               # FastAPI app: routes, background worker, dedup, dashboard
+├── models.py             # SQLModel tables and response models
+├── pyproject.toml        # Project dependencies configuration
+├── README.md             # Documentation and setup instructions
+├── scraper.py            # Selenium Google Maps Updates scraper + CAPTCHA wait loop
+└── uv.lock               # Locked dependency versions
 ```
 
 ---
