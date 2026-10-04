@@ -104,30 +104,22 @@ app = FastAPI(title="Google Maps Competitor Update Intelligence API")
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
 
 async def keep_alive():
-    app_url = os.getenv("APP_URL")
-    if not app_url:
-        logger.warning("APP_URL not set; self-ping disabled.")
-        return
-
-    # Wait 10 seconds before starting first ping loop
-    await asyncio.sleep(10)
-
+    app_url = "https://competitor-radar-dqeq.onrender.com/health"
+    await asyncio.sleep(10)  # Wait 10s after startup
     while True:
         try:
-            # Ping every 10 minutes (600 seconds)
-            logger.info(f"Pinging {app_url} to keep Render awake...")
             req = urllib.request.Request(app_url, headers={"User-Agent": "FastAPI-KeepAlive"})
             urllib.request.urlopen(req, timeout=10)
+            logger.info("Self-ping successful.")
         except Exception as e:
-            logger.error(f"Keep-alive ping failed: {e}")
-
-        await asyncio.sleep(600)
+            logger.error(f"Keep-alive failed: {e}")
+        await asyncio.sleep(600)  # Ping every 10 minutes
 
 @app.on_event("startup")
 def on_startup():
     create_db_and_tables()
     migrate_database()
-
+    keep_alive()
 
 @app.get("/", include_in_schema=False)
 def home():
