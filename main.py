@@ -20,6 +20,8 @@ from ai_providers import (
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, Response
 from pathlib import Path
+from fastapi.responses import HTMLResponse
+from dotenv import load_dotenv
 
 BASE_DIR = Path(__file__).resolve().parent
 sqlite_url = f"sqlite:///{BASE_DIR / 'database.db'}"
@@ -107,7 +109,12 @@ def on_startup():
 
 @app.get("/", include_in_schema=False)
 def home():
-    return FileResponse(BASE_DIR / "frontend.html")
+    load_dotenv()
+    MAP_KEY = os.getenv("MAP_KEY", "")
+    html_path = BASE_DIR / "frontend.html"
+    content = html_path.read_text(encoding="utf-8")
+    injected_content = content.replace("__MAP_URL__", MAP_KEY)
+    return HTMLResponse(content=injected_content)
 
 
 @app.get("/logo.png")
