@@ -25,6 +25,16 @@ from selenium.common.exceptions import (
 )
 from webdriver_manager.chrome import ChromeDriverManager
 
+# Optional automated reCAPTCHA solver (pip install selenium-recaptcha-solver).
+# Different releases expose different class names, so try both.
+try:
+    from selenium_recaptcha_solver import API as _RecaptchaSolver
+except ImportError:
+    try:
+        from selenium_recaptcha_solver import RecaptchaSolver as _RecaptchaSolver
+    except ImportError:
+        _RecaptchaSolver = None
+
 # Set HEADLESS=false so you can see the browser window and solve the CAPTCHA manually.
 HEADLESS = os.getenv("HEADLESS", "false").lower() != "false"
 
@@ -32,6 +42,8 @@ HEADLESS = os.getenv("HEADLESS", "false").lower() != "false"
 PAGE_LOAD_TIMEOUT = 30          # seconds - driver.get() / navigation
 SCRIPT_TIMEOUT = 20             # seconds - any driver.execute_script call
 CAPTCHA_WAIT_TIMEOUT = 180      # seconds - how long we'll wait for a human to solve a CAPTCHA
+AUTO_SOLVE_CAPTCHA = os.getenv("AUTO_SOLVE_CAPTCHA", "true").lower() != "false"
+AUTO_SOLVE_ATTEMPTS = 2         # automated tries before falling back to a human
 SCROLL_WALL_CLOCK_BUDGET = 180  # seconds - hard cap on total time spent scrolling one dialog
 COMPETITOR_WALL_CLOCK_BUDGET = 900 # seconds - hard cap per competitor before we give up and move on
 
@@ -125,6 +137,57 @@ def _timed_input(prompt: str, timeout: int) -> Optional[str]:
         return None
 
 
+def _captcha_still_present(driver) -> bool:
+    """True if a block page / reCAPTCHA iframe is still showing."""
+    try:
+        body_text = driver.find_element(By.TAG_NAME, "body").text.lower()
+        if any(marker in body_text for marker in CAPTCHA_MARKERS):
+            return True
+        return bool(driver.find_elements(By.XPATH, '//iframe[contains(@title, "reCAPTCHA")]'))
+    except Exception:
+        return False
+
+
+def try_auto_solve_captcha(driver) -> bool:
+    """
+    Try to clear a reCAPTCHA v2 automatically. Returns True only if the
+    CAPTCHA is actually gone afterwards. Never raises - any failure just
+    returns False so the caller can fall back to the manual (human) flow.
+    """
+    if not AUTO_SOLVE_CAPTCHA:
+        return False
+    if _RecaptchaSolver is None:
+        print("[!] selenium-recaptcha-solver not installed - skipping auto-solve.")
+        return False
+
+    for attempt in range(1, AUTO_SOLVE_ATTEMPTS + 1):
+        try:
+            iframes = driver.find_elements(By.XPATH, '//iframe[contains(@title, "reCAPTCHA")]')
+            if not iframes:
+                return False  # nothing we know how to solve
+
+            print(f"[*] reCAPTCHA found - auto-solve attempt {attempt}/{AUTO_SOLVE_ATTEMPTS}...")
+            solver = _RecaptchaSolver(driver=driver)
+            solver.click_recaptcha_v2(iframe=iframes[0])
+            time.sleep(3)
+
+            if not _captcha_still_present(driver):
+                print("[+] reCAPTCHA solved automatically.")
+                return True
+        except Exception as exc:
+            print(f"[!] Auto-solve attempt {attempt} failed: {exc.__class__.__name__}: {exc}")
+        finally:
+            # Make sure we're back on the main document, not stuck in the iframe.
+            try:
+                driver.switch_to.default_content()
+            except Exception:
+                pass
+        time.sleep(2)
+
+    print("[!] Auto-solve did not clear the CAPTCHA.")
+    return False
+
+
 def check_and_solve_captcha(driver) -> bool:
     """
     Human-in-the-Loop (HITL) CAPTCHA handler.
@@ -144,6 +207,11 @@ def check_and_solve_captcha(driver) -> bool:
                 is_blocked = True
 
         if is_blocked:
+            # Step 1: try the automated solver.
+            if try_auto_solve_captcha(driver):
+                return True
+
+            # Step 2: fall back to the human-in-the-loop flow.
             print("\n" + "=" * 70)
             print("[!] CAPTCHA / BOT DETECTION TRIGGERED!")
             print(f"[!] Solve it in the browser within {CAPTCHA_WAIT_TIMEOUT}s, then press [ENTER] here.")
@@ -552,6 +620,11 @@ class GoogleUpdatesScraper:
 
     def wait_for_captcha_if_needed(self):
         if not self.captcha_detected():
+            return
+
+        # Try the automated solver first; only wait for a human if it fails.
+        if try_auto_solve_captcha(self.driver) and not self.captcha_detected():
+            self.sleep(2)
             return
 
         print("\n" + "=" * 70)
