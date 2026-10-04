@@ -64,24 +64,41 @@ class ScrapeTimeout(Exception):
 
 def init_driver():
     options = webdriver.ChromeOptions()
-    options.add_argument("--disable-blink-features=AutomationControlled")
+
+    chrome_bin = os.getenv("CHROME_BIN", "/usr/bin/chromium")
+    chromedriver_path = os.getenv(
+        "CHROMEDRIVER_PATH",
+        "/usr/bin/chromedriver"
+    )
+
+    if os.path.exists(chrome_bin):
+        options.binary_location = chrome_bin
+        print(f"[Chrome] Using browser binary: {chrome_bin}")
+
+    options.add_argument("--headless=new")
     options.add_argument("--no-sandbox")
     options.add_argument("--disable-dev-shm-usage")
-    if HEADLESS:
-        options.add_argument("--headless=new")
-        options.add_argument("--window-size=1920,1080")
+    options.add_argument("--disable-gpu")
+    options.add_argument("--disable-blink-features=AutomationControlled")
+
+    if os.path.exists(chromedriver_path):
+        print(f"[Chrome] Using driver: {chromedriver_path}")
+
+        service = Service(executable_path=chromedriver_path)
+
+        driver = webdriver.Chrome(
+            service=service,
+            options=options,
+        )
     else:
-        options.add_argument("--start-maximized")
-    options.add_argument(
-        "user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-        "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
-    )
-    driver = webdriver.Chrome(service=Service(ChromeDriverManager().install()), options=options)
-    # Without these, a slow/hung network request or a runaway execute_script can
-    # block the whole process indefinitely - this is the #1 cause of a scraper
-    # that "just hangs" with no error.
+        print("[Chrome] ChromeDriver not found at configured path.")
+        print("[Chrome] Falling back to Selenium's driver discovery.")
+
+        driver = webdriver.Chrome(options=options)
+
     driver.set_page_load_timeout(PAGE_LOAD_TIMEOUT)
     driver.set_script_timeout(SCRIPT_TIMEOUT)
+
     return driver
 
 
