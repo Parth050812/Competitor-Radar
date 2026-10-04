@@ -22,7 +22,11 @@ from fastapi.responses import FileResponse, Response
 from pathlib import Path
 from fastapi.responses import HTMLResponse
 from dotenv import load_dotenv
-
+import asyncio
+import logging
+import urllib.request
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 BASE_DIR = Path(__file__).resolve().parent
 sqlite_url = f"sqlite:///{BASE_DIR / 'database.db'}"
 engine = create_engine(sqlite_url, connect_args={"check_same_thread": False})
@@ -99,7 +103,25 @@ def get_session():
 app = FastAPI(title="Google Maps Competitor Update Intelligence API")
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
 
+async def keep_alive():
+    app_url = os.getenv("APP_URL")
+    if not app_url:
+        logger.warning("APP_URL not set; self-ping disabled.")
+        return
 
+    # Wait 10 seconds before starting first ping loop
+    await asyncio.sleep(10)
+
+    while True:
+        try:
+            # Ping every 10 minutes (600 seconds)
+            logger.info(f"Pinging {app_url} to keep Render awake...")
+            req = urllib.request.Request(app_url, headers={"User-Agent": "FastAPI-KeepAlive"})
+            urllib.request.urlopen(req, timeout=10)
+        except Exception as e:
+            logger.error(f"Keep-alive ping failed: {e}")
+
+        await asyncio.sleep(600)
 
 @app.on_event("startup")
 def on_startup():
