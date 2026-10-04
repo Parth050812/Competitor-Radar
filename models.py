@@ -41,8 +41,9 @@ class Competitor(SQLModel, table=True):
     name: str
     maps_url: Optional[str] = None
     place_id: Optional[str] = None  # Google's internal id, extracted from the confirmed maps_url
+    address: Optional[str] = None   # branch address, used so Google opens the right branch of a chain
     last_scraped_at: Optional[datetime] = None
-    last_scrape_status: str = "never_run"  # never_run | success | captcha_blocked | error
+    last_scrape_status: str = "never_run"  # never_run | success | no_updates | captcha_blocked | error
 
     project: Optional[Project] = Relationship(back_populates="competitors")
     posts: List["ScrapedPost"] = Relationship(back_populates="competitor")
@@ -67,6 +68,10 @@ class ScrapedPost(SQLModel, table=True):
     post_id: Optional[str] = None          # Google's data-post-id (stable, unique per post)
     cta_text: Optional[str] = None
     topic: Optional[str] = None            # filled in later by AI analysis
+    sub_topic: Optional[str] = None
+    content_type: Optional[str] = None
+    offer_pattern: Optional[str] = None
+    analysis_cta: Optional[str] = None
     keywords_detected: Optional[str] = None  # comma-separated, simple is fine for the core version
     content_hash: str = Field(index=True, unique=True)  # unique = duplicate protection at the DB level
     scraped_at: datetime = Field(default_factory=datetime.utcnow)
@@ -88,8 +93,10 @@ class ScrapeLog(SQLModel, table=True):
     posts_found: int = 0
     new_posts: int = 0
     duplicates_skipped: int = 0
-    status: str = "running"  # running | success | captcha_blocked | error
+    status: str = "running"  # running | success | no_updates | captcha_blocked | error
     error_message: Optional[str] = None
+    # True when the run stopped early because 3 already-saved posts appeared in a row.
+    up_to_date: bool = False
 
     competitor: Optional[Competitor] = Relationship(back_populates="logs")
 
@@ -108,6 +115,9 @@ class GeneratedIdea(SQLModel, table=True):
     # Generated image stored directly in SQLite
     image_data: Optional[bytes] = Field(default=None)
     image_mime_type: Optional[str] = Field(default=None)
+    # Business name used when the stored image was generated.
+    # Lets the app detect stale images if the project business name changes.
+    image_business_name: Optional[str] = None
 
     keywords: Optional[str] = None
     created_at: datetime = Field(default_factory=datetime.utcnow)
@@ -131,5 +141,6 @@ class GeneratedIdeaResponse(BaseModel):
     keywords: Optional[str] = None
     created_at: datetime
 
+    image_business_name: Optional[str] = None
     has_image: bool
     image_url: Optional[str] = None

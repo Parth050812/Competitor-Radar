@@ -6,7 +6,7 @@ import hashlib
 import threading
 import queue
 from dataclasses import dataclass
-from typing import List, Dict, Any, Optional
+from typing import List, Dict, Any, Optional, Callable
 from urllib.parse import quote_plus
 from selenium import webdriver
 from selenium.webdriver.chrome.service import Service
@@ -49,6 +49,11 @@ CTA_LABELS = ["Book", "Call now", "Learn more", "Order online", "Sign up", "Buy"
 
 class CaptchaBlocked(Exception):
     """Raised when Google shows a verification screen and no one solved it in time."""
+    pass
+
+
+class NoUpdatesFound(Exception):
+    """The business panel loaded fine, but the place has never posted Google updates."""
     pass
 
 
@@ -216,6 +221,71 @@ def scroll_sidebar_to_load_all(driver, max_scrolls=20):
             break
         last_height = new_height
 
+_NOT_AN_ADDRESS = re.compile(
+    r"^(open|closed|closes|opens|temporarily|permanently|dine-in|takeaway|take-away|"
+    r"delivery|no delivery|no takeaway|no dine-in|curbside|drive-through|"
+    r"\d(\.\d)?\s*\(|\d(\.\d)?$|\u20b9|rs\.?\s*\d|\$)",
+    re.IGNORECASE,
+)
+
+
+def _address_from_card_text(card_text: str, name: str = "") -> Optional[str]:
+    """
+    A Maps result card reads like:
+        Jimmy's Burger
+        4.2(120) · ₹200–400
+        Fast food restaurant · Shop 5, Sector 17, Vashi
+        Open ⋅ Closes 11 pm
+    The address is the part after the category on the 3rd line.
+    """
+    for raw in (card_text or "").splitlines():
+        line = raw.strip()
+        if not line or line.casefold() == (name or "").strip().casefold():
+            continue
+        parts = [p.strip() for p in re.split(r"[\u00b7\u22c5\u2022]", line) if p.strip()]
+        if len(parts) < 2:
+            continue
+        candidate = parts[-1]
+        if _NOT_AN_ADDRESS.match(candidate) or _NOT_AN_ADDRESS.match(parts[0]):
+            continue
+        if len(candidate) < 4:
+            continue
+        return candidate
+    return None
+
+
+def _read_place_address(driver) -> Optional[str]:
+    """Address from an opened Google Maps place page."""
+    selectors = [
+        (By.CSS_SELECTOR, "button[data-item-id='address']"),
+        (By.XPATH, "//button[starts-with(@aria-label, 'Address:')]"),
+    ]
+    for by, selector in selectors:
+        try:
+            for el in driver.find_elements(by, selector):
+                label = (el.get_attribute("aria-label") or el.text or "").strip()
+                label = re.sub(r"^\s*Address:\s*", "", label, flags=re.IGNORECASE).strip()
+                if label:
+                    return label
+        except Exception:
+            continue
+    return None
+
+
+def build_search_query(name: str, address: Optional[str] = None) -> str:
+    """
+    'Jimmy's Burger' alone matches every branch. Adding the branch's address
+    makes Google open the knowledge panel of that exact place.
+    """
+    name = " ".join((name or "").split())
+    address = " ".join((address or "").split())
+    if not address:
+        return name
+    if address.casefold().startswith(name.casefold()):
+        return address[:160]
+    return f"{name} {address}"[:200]
+
+
 def search_place_candidates(query: str) -> List[Dict[str, Any]]:
     driver = init_driver()
     try:
@@ -247,6 +317,7 @@ def search_place_candidates(query: str) -> List[Dict[str, Any]]:
             current_url = driver.current_url
             return [{
                 "name": name or query,
+                "address": _read_place_address(driver),
                 "maps_url": current_url,
                 "place_id": extract_place_id(current_url),
             }]
@@ -274,8 +345,16 @@ def search_place_candidates(query: str) -> List[Dict[str, Any]]:
             if not name:
                 continue
 
+            address = None
+            try:
+                card = link.find_element(By.XPATH, "./ancestor::div[@role='article'][1]")
+                address = _address_from_card_text(card.text, name)
+            except Exception:
+                pass
+
             candidates.append({
                 "name": name,
+                "address": address,
                 "maps_url": href,
                 "place_id": extract_place_id(href),
             })
@@ -299,6 +378,10 @@ GOOGLE_URL = "https://www.google.com/?hl=en"   # hl=en: the selectors match Engl
 DEFAULT_WAIT = 15
 SCROLL_PAUSE = 1.2
 MAX_SCROLL_ROUNDS = 40
+MAX_DUPLICATE_HITS = 3  # stop a scrape once 3 repeated post-content fingerprints are seen
+# Re-scrape shortcut: Google lists posts newest-first, so once this many posts IN A ROW
+# are already saved in the database, everything older is saved too -> stop, we're up to date.
+MAX_KNOWN_STREAK = 3
 NO_NEW_POST_ROUNDS = 4
 
 
@@ -340,8 +423,21 @@ class GoogleUpdatesScraper:
     keeps control of the browser lifecycle and the watchdog.
     """
 
-    def __init__(self, driver):
+    def __init__(
+        self,
+        driver,
+        competitor_name: str = "",
+        is_known: Optional[Callable[[Dict[str, Any]], bool]] = None,
+    ):
         self.driver = driver
+        self.competitor_name = competitor_name
+        # Callback supplied by main.py: takes the post dict (same shape that
+        # run_competitor_scrape returns) and says whether it is already in the DB.
+        self.is_known = is_known
+        self.known_streak = 0       # consecutive already-saved posts (resets on a new post)
+        self.known_total = 0        # already-saved posts seen this run
+        self.posts_checked = 0      # posts read this run (new + already saved)
+        self.up_to_date = False     # True when we stopped because of MAX_KNOWN_STREAK
         self.wait = WebDriverWait(driver, DEFAULT_WAIT)
         # post_id -> GooglePost. Kept on the instance so that if the run is
         # cut short (watchdog / CAPTCHA) the caller can still keep what was
@@ -351,6 +447,8 @@ class GoogleUpdatesScraper:
         # Google can expose the same visible post under different IDs.
         # Fingerprints stop those content-level duplicates.
         self.collected_fingerprints: set[str] = set()
+        self.duplicate_hits = 0
+        self.stop_requested = False
 
     # ------------------------------------------------------------------
     # basic helpers
@@ -532,6 +630,23 @@ class GoogleUpdatesScraper:
 
         return None
 
+    def business_panel_present(self) -> bool:
+        """True if Google opened a business knowledge panel (Directions / reviews buttons)."""
+        xpaths = [
+            "//*[self::a or self::button or @role='button'][normalize-space()='Directions' or .//*[normalize-space()='Directions']]",
+            "//*[normalize-space()='Write a review']",
+            "//*[normalize-space()='Google reviews']",
+            "//a[contains(@href,'/maps/dir/')]",
+        ]
+        for xp in xpaths:
+            try:
+                for el in self.driver.find_elements(By.XPATH, xp):
+                    if self.visible(el):
+                        return True
+            except Exception:
+                continue
+        return False
+
     def open_updates(self):
         print("[*] Looking for the Updates section...")
 
@@ -543,7 +658,15 @@ class GoogleUpdatesScraper:
             self.sleep(1)
 
         if trigger is None:
-            raise RuntimeError("Could not find 'View previous updates on Google'.")
+            if self.business_panel_present():
+                raise NoUpdatesFound(
+                    f"{self.competitor_name or 'This place'} has not posted anything "
+                    "until now on google updates"
+                )
+            raise RuntimeError(
+                "Could not find the business on Google (no business panel opened). "
+                "Check the name/address and try again."
+            )
 
         print("[+] Found: View previous updates on Google")
 
@@ -1248,13 +1371,48 @@ class GoogleUpdatesScraper:
 
             fingerprint = self._post_fingerprint(captured)
             if fingerprint in self.collected_fingerprints:
-                print(f"    Skipping duplicate content: {post_id}")
+                self.duplicate_hits += 1
+                print(
+                    f"    Skipping duplicate content: {post_id} "
+                    f"(duplicate {self.duplicate_hits}/{MAX_DUPLICATE_HITS})"
+                )
+                if self.duplicate_hits >= MAX_DUPLICATE_HITS:
+                    self.stop_requested = True
+                    print("[*] First 3 duplicate post contents found. Stopping scrape early to save time.")
+                    break
                 continue
+
+            self.posts_checked += 1
+
+            # Already saved from a previous scrape? Posts come newest-first, so
+            # MAX_KNOWN_STREAK saved posts in a row means nothing older is new.
+            if self.is_known is not None:
+                item = _post_to_item(self.competitor_name, captured)
+                if item is not None and self.is_known(item):
+                    self.known_streak += 1
+                    self.known_total += 1
+                    # Remember the fingerprint so scroll-progress logic still
+                    # sees movement, but don't keep the post (no URL work for it).
+                    self.collected_fingerprints.add(fingerprint)
+                    print(
+                        f"    Already saved: {post_id} "
+                        f"(in a row {self.known_streak}/{MAX_KNOWN_STREAK})"
+                    )
+                    if self.known_streak >= MAX_KNOWN_STREAK:
+                        self.up_to_date = True
+                        self.stop_requested = True
+                        print(
+                            f"[+] {MAX_KNOWN_STREAK} already-saved posts in a row. "
+                            "Posts are up to date - stopping the scrape early."
+                        )
+                        break
+                    continue
+                self.known_streak = 0
 
             self.collected[post_id] = captured
             self.collected_fingerprints.add(fingerprint)
             added += 1
-            print(f"    Captured post {len(self.collected_fingerprints):02d}: {post_id}")
+            print(f"    Captured NEW post {len(self.collected):02d}: {post_id}")
 
         return added
 
@@ -1272,6 +1430,9 @@ class GoogleUpdatesScraper:
         if initial_posts:
             print(f"[*] Initial post cards detected: {len(initial_posts)}")
             self.collect_current_posts(initial_posts)
+            if self.stop_requested:
+                print(f"[+] Finished loading posts. New posts: {len(self.collected)}")
+                return self.collected
         else:
             print("[!] No article[data-post-id] cards yet. Waiting once more...")
             self.sleep(2)
@@ -1304,6 +1465,8 @@ class GoogleUpdatesScraper:
 
             before_count = len(self.collected_fingerprints)
             self.collect_current_posts(self.get_posts())
+            if self.stop_requested:
+                break
 
             try:
                 top, height, client = self._scroll_metrics(container)
@@ -1323,6 +1486,8 @@ class GoogleUpdatesScraper:
                 after_top, after_height, after_client = self._scroll_metrics(container)
                 self.collect_current_posts(self.get_posts())
                 after_count = len(self.collected_fingerprints)
+                if self.stop_requested:
+                    break
 
                 print(
                     f"    Scroll {round_number:02d} | posts={after_count} | "
@@ -1368,6 +1533,8 @@ class GoogleUpdatesScraper:
 
         for round_number in range(1, MAX_SCROLL_ROUNDS + 1):
             self.collect_current_posts()
+            if self.stop_requested:
+                break
             count_before = len(self.collected)
 
             self.driver.execute_script(
@@ -1388,6 +1555,8 @@ class GoogleUpdatesScraper:
 
             self.sleep(SCROLL_PAUSE)
             self.collect_current_posts()
+            if self.stop_requested:
+                break
 
             count_after = len(self.collected)
             print(f"    Fallback scroll {round_number:02d} | posts={count_after}")
@@ -1623,7 +1792,10 @@ class GoogleUpdatesScraper:
         self.scroll_all_posts()
 
         if not self.collected:
-            print("[-] No posts were collected during scrolling.")
+            if self.up_to_date:
+                print("[+] Nothing new - posts are up to date.")
+            else:
+                print("[-] No posts were collected during scrolling.")
             return []
 
         posts = list(self.collected.values())
@@ -1659,43 +1831,66 @@ def _make_content_hash(competitor_name: str, post: GooglePost) -> str:
     return hashlib.md5(key.encode("utf-8")).hexdigest()
 
 
+def _post_to_item(competitor_name: str, p: GooglePost) -> Optional[Dict[str, Any]]:
+    """GooglePost -> the dict shape main.py stores. None if the post is empty."""
+    content = (p.content or "").strip()
+    title = (p.title or "").strip() or None
+
+    if not content and not title and not p.image_url and not p.video_url:
+        return None
+
+    return {
+        "date": p.date or "",
+        "title": title,
+        "validity": (p.validity or "").strip() or None,
+        "content": content or (title or ""),
+        "cta_text": p.cta_text,
+        "image_url": p.image_url,
+        "video_url": p.video_url,
+        "post_url": p.post_url,
+        "post_id": p.post_id,
+        "feature_id": p.feature_id,
+        "content_id": p.content_id,
+        "content_hash": _make_content_hash(competitor_name, p),
+    }
+
+
 def _to_db_posts(competitor_name: str, gposts: List[GooglePost]) -> List[Dict[str, Any]]:
     posts = []
     seen_hashes = set()
 
     for p in gposts:
-        content = (p.content or "").strip()
-        title = (p.title or "").strip() or None
-
-        if not content and not title and not p.image_url and not p.video_url:
+        item = _post_to_item(competitor_name, p)
+        if item is None:
             continue
-
-        content_hash = _make_content_hash(competitor_name, p)
-        if content_hash in seen_hashes:
+        if item["content_hash"] in seen_hashes:
             continue
-        seen_hashes.add(content_hash)
-
-        posts.append({
-            "date": p.date or "",
-            "title": title,
-            "validity": (p.validity or "").strip() or None,
-            "content": content or (title or ""),
-            "cta_text": p.cta_text,
-            "image_url": p.image_url,
-            "video_url": p.video_url,
-            "post_url": p.post_url,
-            "post_id": p.post_id,
-            "feature_id": p.feature_id,
-            "content_id": p.content_id,
-            "content_hash": content_hash,
-        })
+        seen_hashes.add(item["content_hash"])
+        posts.append(item)
 
     return posts
 
 
-def run_competitor_scrape(competitor_name: str, maps_url: Optional[str] = None) -> List[Dict[str, Any]]:
+def run_competitor_scrape(
+    competitor_name: str,
+    maps_url: Optional[str] = None,
+    is_known: Optional[Callable[[Dict[str, Any]], bool]] = None,
+    stats: Optional[Dict[str, Any]] = None,
+    address: Optional[str] = None,
+) -> List[Dict[str, Any]]:
     """
-    Public entry point main.py imports (signature unchanged).
+    Public entry point main.py imports.
+
+    address:  the branch's street address. The Google search uses "name + address"
+              so chains with many branches open the RIGHT one. If it is missing it
+              is read from maps_url first (and returned in stats["address"]).
+
+    is_known: optional callback(post_dict) -> bool telling us whether a post is
+              already saved. When MAX_KNOWN_STREAK saved posts show up in a row
+              the scrape stops early ("posts are up to date") and only the NEW
+              posts found before that point are returned.
+    stats:    optional dict that gets filled with
+              {"up_to_date": bool, "posts_checked": int, "known_posts": int}
 
     Searches Google for the competitor, opens "View previous updates on
     Google", reads every post card, then collects each post's share.google
@@ -1722,31 +1917,67 @@ def run_competitor_scrape(competitor_name: str, maps_url: Optional[str] = None) 
     timer.daemon = True
     timer.start()
 
-    scraper = GoogleUpdatesScraper(driver)
+    scraper = GoogleUpdatesScraper(driver, competitor_name=competitor_name, is_known=is_known)
     gposts: List[GooglePost] = []
+
+    resolved_address = (address or "").strip() or None
+
+    def _fill_stats():
+        if stats is not None:
+            stats["address"] = resolved_address
+            stats["up_to_date"] = scraper.up_to_date
+            stats["posts_checked"] = scraper.posts_checked
+            stats["known_posts"] = scraper.known_total
 
     try:
         print("\n" + "#" * 80)
         print(f"SCRAPING: {competitor_name}")
         print("#" * 80)
 
+        # Chains (e.g. "Jimmy's Burger") have many branches. Make sure we know THIS
+        # branch's address so Google opens the right panel.
+        if not resolved_address and maps_url:
+            section("LOOKING UP BRANCH ADDRESS")
+            try:
+                driver.get(maps_url)
+                scraper.sleep(4)
+                dismiss_consent_dialog(driver)
+                resolved_address = _read_place_address(driver)
+                print(f"[+] Branch address: {resolved_address or 'not found'}")
+            except Exception as exc:
+                print(f"[!] Could not read the branch address from the Maps link: {exc}")
+
+        search_query = build_search_query(competitor_name, resolved_address)
+
         section("GOOGLE SEARCH")
         try:
-            scraper.search(competitor_name)
+            scraper.search(search_query)
         except TimeoutException:
             print(f"[-] {competitor_name}: Google search timed out. Skipping.")
+            if stats is not None:
+                stats["error"] = "Google search timed out. Try again."
             return []
 
         section("OPENING UPDATES")
         try:
             scraper.open_updates()
+        except NoUpdatesFound as e:
+            print(f"[-] {e}")
+            if stats is not None:
+                stats["no_updates"] = True
+            return []
         except RuntimeError as e:
             print(f"[-] {competitor_name}: {e} Skipping.")
+            if stats is not None:
+                stats["error"] = str(e)
             return []
 
         gposts = scraper.scrape_posts()
         if not gposts:
-            print(f"[-] {competitor_name}: no update cards found.")
+            if scraper.up_to_date:
+                print(f"[+] {competitor_name}: posts are up to date, nothing new to add.")
+            else:
+                print(f"[-] {competitor_name}: no update cards found.")
             return []
 
     except CaptchaBlocked:
@@ -1762,6 +1993,7 @@ def run_competitor_scrape(competitor_name: str, maps_url: Optional[str] = None) 
               f"Keeping {len(gposts)} post(s) collected so far.")
     finally:
         timer.cancel()
+        _fill_stats()
         try:
             driver.quit()
         except Exception:
@@ -1779,4 +2011,3 @@ def run_competitor_scrape(competitor_name: str, maps_url: Optional[str] = None) 
     posts = _to_db_posts(competitor_name, gposts)
     print(f"[+] Successfully collected {len(posts)} posts for {competitor_name}.")
     return posts
-

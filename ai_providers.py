@@ -134,7 +134,11 @@ class AIProviderError(Exception):
 
 class PostAnalysis(BaseModel):
     post_number: int = Field(description="The post number exactly as given in the input (1, 2, 3...).")
-    topic: str = Field(description="Short category label, e.g. 'Buffet Offer', 'Event Announcement', 'New Menu'.")
+    topic: str = Field(description="Short standard category label, e.g. 'Buffet Offer', 'Event Announcement', 'New Menu'.")
+    sub_topic: str = Field(description="A specific, useful sub-topic inside the main topic, e.g. 'Year-end family buffet', 'Gift card pricing', 'New seafood dish'.")
+    content_type: str = Field(description="Content format/purpose, e.g. 'Offer', 'Announcement', 'New Menu', 'Event', 'Engagement', 'General'.")
+    offer_pattern: str = Field(description="Specific offer/promotion mechanic if present, otherwise 'None'.")
+    cta: str = Field(description="The call-to-action used or implied by the post, e.g. 'Book', 'Order online', 'Learn more', 'Call now', otherwise 'None'.")
     keywords: List[str] = Field(description="2 to 5 marketing keywords from the post.")
 
 
@@ -517,9 +521,16 @@ def analyze_posts(post_contents: List[str]) -> List[Dict[str, Any]]:
 You are an expert local SEO and Google Maps marketing analyst.
 Below are {len(post_contents)} Google Maps updates posted by competitors.
 
-For EVERY post, give a short standard topic label and 2 to 5 marketing keywords.
-Use the same label for the same kind of post (for example always 'Buffet Offer', never
-'Buffet Offers' or 'Buffet Deal' in the same batch).
+For EVERY post, return ALL of these fields:
+- topic: a short standard category label.
+- sub_topic: the specific subject inside that category.
+- content_type: what kind of marketing post it is.
+- offer_pattern: the exact offer/promotion mechanic if there is one, otherwise 'None'.
+- cta: the call-to-action used or implied, otherwise 'None'.
+- keywords: 2 to 5 useful marketing keywords.
+Use the same topic label for the same kind of post (for example always 'Buffet Offer', never
+'Buffet Offers' or 'Buffet Deal' in the same batch). The sub-topic should be specific to the actual post.
+Do not invent an offer, CTA, product, or event that is not supported by the post.
 Use the post_number exactly as given in the input.
 
 {joined}
@@ -533,10 +544,24 @@ Use the post_number exactly as given in the input.
     for n in range(1, len(post_contents) + 1):
         item = by_number.get(n)
         if item:
-            output.append({"topic": item.topic, "keywords": item.keywords})
+            output.append({
+                "topic": item.topic,
+                "sub_topic": item.sub_topic,
+                "content_type": item.content_type,
+                "offer_pattern": item.offer_pattern,
+                "cta": item.cta,
+                "keywords": item.keywords,
+            })
         else:
             missing += 1
-            output.append({"topic": None, "keywords": []})  # left unanalyzed, not filled with fake data
+            output.append({
+                "topic": None,
+                "sub_topic": None,
+                "content_type": None,
+                "offer_pattern": None,
+                "cta": None,
+                "keywords": [],
+            })  # left unanalyzed, not filled with fake data
 
     if missing == len(post_contents):
         raise AIProviderError("AI response did not contain any usable analysis.")
@@ -729,6 +754,7 @@ def generate_ideas(
     festivals: Optional[List[Dict[str, str]]] = None,
     region: str = "India",
     days_ahead: int = 60,
+    previous_ideas: Optional[List[Dict[str, Any]]] = None,
 ) -> List[Dict[str, Any]]:
     """
     posts: analyzed posts from the DB, e.g.
@@ -804,7 +830,12 @@ Think of angles nobody above covers: seasonal moments, behind-the-scenes, commun
 a specific audience, a new experience.
 """
 
-    avoid_text = ", ".join(avoid_topics) if avoid_topics else "None"
+    all_avoid = list(avoid_topics or [])
+    for prev in (previous_ideas or []):
+        t = str(prev.get("topic") or "").strip()
+        if t and t not in all_avoid:
+            all_avoid.append(t)
+    avoid_text = ", ".join(all_avoid) if all_avoid else "None"
 
     prompt = f"""
 You are a local business marketing strategy engine for Google Maps update posts.
@@ -830,12 +861,13 @@ RULES FOR ALL IDEAS:
   Where a specific detail is needed, write a [PLACEHOLDER] instead.
 - The exact business name is **{business_name or "a local business"}**. Naturally mention that exact name once in each draft_copy when it fits, so the user can copy the post directly. Do not repeat it unnaturally.
 - YOUR FOCUS KEYWORDS ARE A REQUIRED INPUT, NOT A SUGGESTION. If one or more focus keywords are supplied, EVERY idea must be built around at least one of them. Do not generate an unrelated idea just because a competitor trend is available.
-- The focus keyword controls the subject of the idea. Example: if the focus keyword is "gift card", the idea must actually be about gift cards (not sandwiches, buffets, or behind-the-scenes content). If it is "food festival", the idea must actually be about a food-festival/food-event angle.
+- The focus keyword controls the subject of the idea. Example: if the focus keyword is "gift card", the idea must actually be about gift cards (not an unrelated dish, buffet, or behind-the-scenes content). If it is "food festival", the idea must actually be about a food-festival/food-event angle.
 - For every idea, set focus_keywords_used to the exact focus keyword(s) that drive the idea. Use the exact phrase naturally in the draft_copy and include it in the target keywords.
 - Never output a generic idea and merely add the focus keyword as a tag. The post topic, draft copy, CTA and image concept must all support the chosen focus keyword.
 - If multiple focus keywords are supplied, distribute ideas across them when possible.
 - Competitor topics and keywords are supporting inspiration only. The user's focus keywords determine the subject/angle of the idea.
-- image_concept is a hard visual instruction. It MUST describe the same subject and message as draft_copy. If the post is about sandwich making, the image concept must explicitly be about sandwich making; never substitute a generic food festival, buffet, gift-card, or unrelated scene.
+- image_concept is a hard visual instruction. It MUST describe the same subject and message as draft_copy, and must never be swapped for a generic food festival, buffet, gift-card, or unrelated scene.
+- image_concept must describe ONLY what is visible: the product/dish, setting, props, lighting and composition. Do NOT put any text, words, slogans, prices, signage, logos or business names in image_concept (the business name is added to the image separately).
 """
 
     result = _call_ai(prompt, IdeasResult, temperature=0.7)
@@ -901,19 +933,62 @@ def _image_headline(topic: str, draft_copy: str = "") -> str:
     return headline[:70]
 
 
+def _clean_visual_concept(
+    concept: str,
+    business_name: str = "",
+    previous_business_names: Optional[List[str]] = None,
+) -> str:
+    """
+    Reduce the stored image_concept to a purely visual description.
+
+    Old ideas (or ideas written for a previous business) can contain brand names,
+    quoted slogans, or sentences about signs/logos/text. Image models happily
+    paint all of that into the picture, so strip it before it reaches the model.
+    """
+    text = " ".join((concept or "").split())
+
+    # 1. Remove the current and any previous business names from the concept.
+    names = [business_name, *(previous_business_names or [])]
+    for name in sorted({n.strip() for n in names if n and n.strip()}, key=len, reverse=True):
+        text = re.sub(re.escape(name), "the venue", text, flags=re.IGNORECASE)
+
+    # 2. Remove quoted strings (slogans, headlines, "text reading ...").
+    text = re.sub(r'["\u201c\u201d][^"\u201c\u201d]{1,150}["\u201c\u201d]', "", text)
+
+    # 3. Drop whole sentences that talk about writing/branding things in the image.
+    text_words = re.compile(
+        r"\b(text|caption|headline|tagline|slogan|logo|sign(?:age|board)?|banner|"
+        r"typography|lettering|font|watermark|overlay(?:ed)?|label(?:led)?|"
+        r"written|reads|reading|says|poster|menu board|price tag)\b",
+        re.IGNORECASE,
+    )
+    sentences = re.split(r"(?<=[.!?])\s+", text)
+    kept = [s for s in sentences if s.strip() and not text_words.search(s)]
+
+    cleaned = " ".join(kept).strip()
+    if not cleaned:  # every sentence mentioned text - keep the quote-free version
+        cleaned = text.strip()
+    return re.sub(r"\s+", " ", cleaned)
+
+
 def generate_image(
     image_concept: str,
     topic: str = "",
     draft_copy: str = "",
     cta_suggested: str = "",
     business_name: str = "",
+    previous_business_names: Optional[List[str]] = None,
 ) -> Dict[str, Any]:
     """
     Generate exactly one marketing image for one GeneratedIdea using
     Hugging Face Inference Providers.
 
-    The image model receives the actual post context rather than only the
-    image_concept, so the visual can match the message being advertised.
+    The picture is built from the visual brief (image_concept) only. The ONLY
+    text allowed in the image is the CURRENT business name, shown once below
+    the product. topic / draft_copy / cta_suggested are accepted for backwards
+    compatibility but deliberately NOT sent to the image model: any words in
+    the prompt tend to get painted into the picture (and the copy may still
+    contain an older business name).
 
     Returns:
         {
@@ -929,69 +1004,29 @@ def generate_image(
     if not image_concept or not image_concept.strip():
         raise AIProviderError("This idea does not have an image concept.")
 
-    headline = _image_headline(topic, draft_copy)
+    brand = " ".join((business_name or "").split())
+    visual_brief = _clean_visual_concept(image_concept, brand, previous_business_names)
 
-    context_lines = [
-        f"POST TOPIC / HEADLINE: {headline}" if headline else "",
-        f"POST COPY: {draft_copy.strip()}" if draft_copy else "",
-        f"CTA: {cta_suggested.strip()}" if cta_suggested else "",
-        f"BUSINESS: {business_name.strip()}" if business_name else "",
-        f"IMAGE CONCEPT: {image_concept.strip()}",
-    ]
-    context = "\n".join(line for line in context_lines if line)
+    if brand:
+        text_rule = (
+            f'TEXT IN THE IMAGE: exactly one line of text, "{brand}", written in clean, '
+            f"elegant lettering, centered in the empty space directly BELOW the product. "
+            f"Spell it exactly: {brand}. "
+            f"There is no other text anywhere: no tagline, slogan, caption, price, "
+            f"offer, call-to-action, logo, watermark, numbers or extra letters."
+        )
+    else:
+        text_rule = (
+            "TEXT IN THE IMAGE: none. No words, letters, numbers, logos or watermarks anywhere."
+        )
 
-    prompt = f"""
-Create ONE finished photorealistic commercial advertising image.
+    prompt = f"""Professional commercial advertising photograph, photorealistic, premium food and hospitality photography.
 
-HARD REQUIREMENT — MATCH THE POST EXACTLY
-The EXACT IMAGE CONCEPT below is the visual brief. Follow it literally.
-Do not reinterpret it into a generic food advertisement.
+SUBJECT (main focus, sharp and centered, fills most of the frame): {visual_brief}
 
-BUSINESS NAME: {business_name or "Local Business"}
-POST TOPIC: {headline or topic}
-POST COPY: {draft_copy.strip() if draft_copy else ""}
-CTA: {cta_suggested.strip() if cta_suggested else ""}
-EXACT IMAGE CONCEPT: {image_concept.strip()}
+COMPOSITION: The product is the hero. Leave a clean, uncluttered area directly below it for the business name. Natural commercial lighting, realistic shadows and materials, shallow depth of field, believable proportions. Single image, no collage, no panels, no borders, no UI.
 
-SCENE RULES:
-- The hero subject in EXACT IMAGE CONCEPT must be the main subject of the image.
-- The scene must directly illustrate the POST COPY.
-- Preserve the requested food/service, people or hands, setting, ingredients,
-  props and composition when they are specified.
-- If the concept says "hands assembling a sandwich", the image MUST visibly show
-  hands assembling a sandwich with the requested ingredients.
-- If the concept says catering, show catering.
-- If the concept says a specific dish, show that dish.
-- Do not replace the requested scene with a buffet, festival, gift card,
-  restaurant interior, generic platter, or random food photography.
-- Do not invent an unrelated occasion or promotion.
-- Do not let the tagline or business name change the visual subject.
-
-PHOTOGRAPHY:
-- Premium real-world commercial photography.
-- Photorealistic, believable proportions and materials.
-- Main subject sharp, detailed and visually dominant.
-- Natural commercial lighting and realistic shadows.
-- Tasteful depth of field; supporting background may be softer but the hero subject
-  must remain clear.
-- No surreal objects, floating food, impossible hands, random props, collage,
-  poster template, UI, borders or multiple panels.
-
-TEXT:
-- Do not render the full post copy.
-- If text is used, create ONE short tagline derived from the actual POST COPY.
-- Keep the tagline secondary to the visual.
-- At the bottom, add the exact business name: "{business_name or "Local Business"}".
-- Never use an unrelated slogan.
-
-FACTUAL RULE:
-Only show facts, products, offers, ingredients, locations or occasions that are
-supported by the POST COPY or EXACT IMAGE CONCEPT.
-
-FINAL OUTPUT:
-ONE brand-ready advertising image whose visual content clearly matches the exact
-image concept and post. The viewer should immediately understand what the post
-is advertising.
+{text_rule}
 """
 
     try:

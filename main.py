@@ -1,8 +1,10 @@
 import os
+import hashlib
 from datetime import datetime
 from typing import List, Optional
 from fastapi import FastAPI, BackgroundTasks, Depends, HTTPException
 from sqlmodel import SQLModel, Session, create_engine, select
+from sqlalchemy.exc import IntegrityError
 from pydantic import BaseModel
 from fastapi import HTTPException
 from models import Project, Competitor, ScrapedPost, GeneratedIdea, Keyword, ScrapeLog, GeneratedIdeaResponse
@@ -35,6 +37,18 @@ def migrate_database():
         column["name"]
         for column in inspector.get_columns("generatedidea")
     }
+    post_columns = {
+        column["name"]
+        for column in inspector.get_columns("scrapedpost")
+    }
+    log_columns = {
+        column["name"]
+        for column in inspector.get_columns("scrapelog")
+    }
+    competitor_columns = {
+        column["name"]
+        for column in inspector.get_columns("competitor")
+    }
 
     with engine.begin() as conn:
         if "image_data" not in columns:
@@ -47,6 +61,11 @@ def migrate_database():
                 text("ALTER TABLE generatedidea ADD COLUMN image_mime_type VARCHAR")
             )
 
+        if "image_business_name" not in columns:
+            conn.execute(
+                text("ALTER TABLE generatedidea ADD COLUMN image_business_name VARCHAR")
+            )
+
         if "source_trend" not in columns:
             conn.execute(
                 text("ALTER TABLE generatedidea ADD COLUMN source_trend VARCHAR")
@@ -57,13 +76,25 @@ def migrate_database():
                 text("ALTER TABLE generatedidea ADD COLUMN strategy_reason VARCHAR")
             )
 
+        if "address" not in competitor_columns:
+            conn.execute(text("ALTER TABLE competitor ADD COLUMN address VARCHAR"))
+
+        if "up_to_date" not in log_columns:
+            conn.execute(
+                text("ALTER TABLE scrapelog ADD COLUMN up_to_date BOOLEAN DEFAULT 0")
+            )
+
+        for name in ("sub_topic", "content_type", "offer_pattern", "analysis_cta"):
+            if name not in post_columns:
+                conn.execute(text(f"ALTER TABLE scrapedpost ADD COLUMN {name} VARCHAR"))
+
 def get_session():
     with Session(engine) as session:
         yield session
 
 
 app = FastAPI(title="Google Maps Competitor Update Intelligence API")
-app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])   
+app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
 
 
 
@@ -89,6 +120,7 @@ class CompetitorIn(BaseModel):
     name: str
     maps_url: Optional[str] = None
     place_id: Optional[str] = None
+    address: Optional[str] = None
 
 
 class KeywordIn(BaseModel):
@@ -124,18 +156,31 @@ def project_dashboard(project_id: int, session: Session = Depends(get_session)):
     competitor_ids = [c.id for c in competitors]
     posts = session.exec(select(ScrapedPost).where(ScrapedPost.competitor_id.in_(competitor_ids))).all() if competitor_ids else []
     ideas = session.exec(select(GeneratedIdea).where(GeneratedIdea.project_id == project_id)).all()
+    logs = session.exec(select(ScrapeLog).where(ScrapeLog.competitor_id.in_(competitor_ids))).all() if competitor_ids else []
 
     topic_counts = {}
+    keyword_counts = {}
     for p in posts:
         if p.topic:
             topic_counts[p.topic] = topic_counts.get(p.topic, 0) + 1
+        for kw in (p.keywords_detected or "").split(","):
+            kw = kw.strip()
+            if kw:
+                key = kw.casefold()
+                keyword_counts[key] = keyword_counts.get(key, 0) + 1
 
     return {
         "competitor_count": len(competitors),
         "total_posts": len(posts),
+        "analyzed_posts": sum(1 for p in posts if (p.topic or "").strip()),
+        "unanalyzed_posts": sum(1 for p in posts if not (p.topic or "").strip()),
         "generated_idea_count": len(ideas),
-        "top_topics": sorted(topic_counts.items(), key=lambda x: -x[1])[:5],
+        "top_topics": sorted(topic_counts.items(), key=lambda x: (-x[1], x[0]))[:5],
+        "top_keywords": sorted(keyword_counts.items(), key=lambda x: (-x[1], x[0]))[:8],
         "last_scrape": max((c.last_scraped_at for c in competitors if c.last_scraped_at), default=None),
+        "new_posts_latest": max((l.new_posts for l in logs), default=0),
+        "duplicates_skipped_total": sum(l.duplicates_skipped or 0 for l in logs),
+        "scrape_failures": sum(1 for l in logs if l.status in ("error", "captcha_blocked")),
     }
 
 
@@ -178,6 +223,7 @@ def add_competitor(project_id: int, body: CompetitorIn, session: Session = Depen
         name=body.name,
         maps_url=body.maps_url,
         place_id=body.place_id,
+        address=(body.address or "").strip() or None,
     )
     session.add(competitor)
     session.commit()
@@ -197,6 +243,8 @@ def edit_competitor(competitor_id: int, body: CompetitorIn, session: Session = D
         raise HTTPException(status_code=404, detail="Competitor not found")
     competitor.name = body.name
     competitor.maps_url = body.maps_url
+    if body.address is not None:
+        competitor.address = body.address.strip() or None
     session.add(competitor)
     session.commit()
     session.refresh(competitor)
@@ -251,6 +299,17 @@ def delete_keyword(project_id: int, keyword_id: int, session: Session = Depends(
 
 # --- 4. SCRAPING (background worker + persistent logs + CAPTCHA handling) ---
 
+def _row_hash(competitor_id: int, item: dict) -> str:
+    """
+    content_hash is UNIQUE across the whole table, but the scraper's hash only
+    contains the competitor NAME. Two rivals with the same name (two branches of
+    one chain, or the same rival in two projects) therefore produced the same
+    hash for the same post and the insert crashed. Scoping the stored hash by
+    competitor id makes it unique per rival.
+    """
+    return hashlib.md5(f"{competitor_id}|{item['content_hash']}".encode("utf-8")).hexdigest()
+
+
 def background_scrape_worker(competitor_id: int):
     with Session(engine) as session:
         competitor = session.get(Competitor, competitor_id)
@@ -263,75 +322,114 @@ def background_scrape_worker(competitor_id: int):
         session.refresh(log)
 
         try:
-            scraped_data = run_competitor_scrape(competitor.name, maps_url=competitor.maps_url)
-
-            new_count = 0
-            dup_count = 0
-            for item in scraped_data:
-                # Primary duplicate rule: same competitor + same content hash.
-                # The hash is based on visible post content, not Google's transient ID.
-                exists = session.exec(
-                    select(ScrapedPost).where(
+            def post_already_saved(item: dict) -> bool:
+                """Same duplicate rules as below, used by the scraper to stop early."""
+                if session.exec(
+                    select(ScrapedPost.id).where(
                         ScrapedPost.competitor_id == competitor_id,
-                        ScrapedPost.content_hash == item["content_hash"],
+                        ScrapedPost.content_hash.in_(
+                            [item["content_hash"], _row_hash(competitor_id, item)]
+                        ),
                     )
-                ).first()
+                ).first():
+                    return True
 
                 # Backward compatibility for rows created before content-based hashes.
-                if not exists and item.get("post_id"):
-                    exists = session.exec(
-                        select(ScrapedPost).where(
-                            ScrapedPost.competitor_id == competitor_id,
-                            ScrapedPost.post_id == item.get("post_id"),
-                        )
-                    ).first()
+                if item.get("post_id") and session.exec(
+                    select(ScrapedPost.id).where(
+                        ScrapedPost.competitor_id == competitor_id,
+                        ScrapedPost.post_id == item.get("post_id"),
+                    )
+                ).first():
+                    return True
 
-                if not exists:
-                    exists = session.exec(
-                        select(ScrapedPost).where(
-                            ScrapedPost.competitor_id == competitor_id,
-                            ScrapedPost.published_date == item.get("date"),
-                            ScrapedPost.title == item.get("title"),
-                            ScrapedPost.content == item.get("content"),
-                            ScrapedPost.validity == item.get("validity"),
-                        )
-                    ).first()
+                return bool(session.exec(
+                    select(ScrapedPost.id).where(
+                        ScrapedPost.competitor_id == competitor_id,
+                        ScrapedPost.published_date == item.get("date"),
+                        ScrapedPost.title == item.get("title"),
+                        ScrapedPost.content == item.get("content"),
+                        ScrapedPost.validity == item.get("validity"),
+                    )
+                ).first())
 
-                if exists:
+            scrape_stats: dict = {}
+            scraped_data = run_competitor_scrape(
+                competitor.name,
+                maps_url=competitor.maps_url,
+                is_known=post_already_saved,
+                stats=scrape_stats,
+                address=competitor.address,
+            )
+
+            # Remember the branch address (read from the Maps link) for next time.
+            if scrape_stats.get("address") and not competitor.address:
+                competitor.address = scrape_stats["address"]
+
+            if scrape_stats.get("error"):
+                raise RuntimeError(scrape_stats["error"])
+
+            if scrape_stats.get("no_updates"):
+                msg = f"{competitor.name} has not posted anything until now on google updates"
+                competitor.last_scraped_at = datetime.utcnow()
+                competitor.last_scrape_status = "no_updates"
+                log.status = "no_updates"
+                log.error_message = msg
+                return
+
+            new_count = 0
+            # Posts the scraper already recognised as saved (it stopped after 3 in a row).
+            dup_count = scrape_stats.get("known_posts", 0)
+            for item in scraped_data:
+                # Safety net: the scraper only returns posts it believes are new,
+                # but keep the DB-level check so a duplicate can never be inserted.
+                if post_already_saved(item):
                     dup_count += 1
                     continue
 
-                session.add(ScrapedPost(
-                    competitor_id=competitor_id,
-                    content=item["content"],
-                    published_date=item.get("date"),
-                    title=item.get("title"),
-                    validity=item.get("validity"),
-                    post_id=item.get("post_id"),
-                    cta_text=item.get("cta_text"),
-                    image_url=item.get("image_url"),
-                    video_url=item.get("video_url"),
-                    post_url=item.get("post_url"),
-                    content_hash=item["content_hash"],
-                ))
-                new_count += 1
+                # Savepoint per post: if the DB still rejects one row, only that
+                # post is skipped - the rest of the run and the log are not lost.
+                try:
+                    with session.begin_nested():
+                        session.add(ScrapedPost(
+                            competitor_id=competitor_id,
+                            content=item["content"],
+                            published_date=item.get("date"),
+                            title=item.get("title"),
+                            validity=item.get("validity"),
+                            post_id=item.get("post_id"),
+                            cta_text=item.get("cta_text"),
+                            image_url=item.get("image_url"),
+                            video_url=item.get("video_url"),
+                            post_url=item.get("post_url"),
+                            content_hash=_row_hash(competitor_id, item),
+                        ))
+                    new_count += 1
+                except IntegrityError:
+                    print(f"[!] Skipped a post the database already has (hash clash): {item.get('post_id')}")
+                    dup_count += 1
 
             competitor.last_scraped_at = datetime.utcnow()
             competitor.last_scrape_status = "success"
             log.status = "success"
-            log.posts_found = len(scraped_data)
+            log.posts_found = scrape_stats.get("posts_checked", len(scraped_data))
             log.new_posts = new_count
             log.duplicates_skipped = dup_count
+            log.up_to_date = bool(scrape_stats.get("up_to_date")) and new_count == 0
 
         except CaptchaBlocked as e:
+            session.rollback()
             competitor.last_scrape_status = "captcha_blocked"
             log.status = "captcha_blocked"
             log.error_message = str(e)
 
         except Exception as e:
+            # A failed flush leaves the session unusable until it is rolled back;
+            # without this the final commit below raised PendingRollbackError.
+            session.rollback()
             competitor.last_scrape_status = "error"
             log.status = "error"
-            log.error_message = str(e)
+            log.error_message = str(e)[:500]
 
         finally:
             log.finished_at = datetime.utcnow()
@@ -364,6 +462,10 @@ def get_project_posts(
     project_id: int,
     competitor_id: Optional[int] = None,
     topic: Optional[str] = None,
+    q: Optional[str] = None,
+    keyword: Optional[str] = None,
+    date_from: Optional[str] = None,
+    date_to: Optional[str] = None,
     session: Session = Depends(get_session),
 ):
     statement = select(ScrapedPost).join(Competitor).where(Competitor.project_id == project_id)
@@ -371,7 +473,20 @@ def get_project_posts(
         statement = statement.where(ScrapedPost.competitor_id == competitor_id)
     if topic:
         statement = statement.where(ScrapedPost.topic == topic)
-    return session.exec(statement).all()
+    rows = session.exec(statement.order_by(ScrapedPost.id.desc())).all()
+
+    def contains(value: Optional[str], needle: str) -> bool:
+        return needle.casefold() in (value or "").casefold()
+
+    if q:
+        rows = [p for p in rows if any(contains(v, q) for v in (p.content, p.title, p.topic, p.keywords_detected, p.cta_text))]
+    if keyword:
+        rows = [p for p in rows if contains(p.keywords_detected, keyword) or contains(p.content, keyword)]
+    if date_from:
+        rows = [p for p in rows if (p.published_date or "") >= date_from]
+    if date_to:
+        rows = [p for p in rows if (p.published_date or "") <= date_to]
+    return rows
 
 
 # --- 6. AI ANALYSIS + TRENDS ---
@@ -388,7 +503,12 @@ def analyze_project(project_id: int, session: Session = Depends(get_session)):
     # Only send posts that have not been analyzed yet. A post is considered
     # analyzed when it has a non-empty AI topic. This prevents every click of
     # the button from re-processing the entire repository.
-    pending = [p for p in posts if not (p.topic or "").strip()]
+    # A post is fully analyzed only when the richer analysis fields are present.
+    # This also lets older posts that only have topic/keywords get upgraded once.
+    pending = [
+        p for p in posts
+        if not (p.topic or "").strip() or not (p.sub_topic or "").strip()
+    ]
 
     if not pending:
         return {"analyzed_posts": 0, "remaining_unanalyzed": 0, "message": "All posts are already analyzed."}
@@ -407,6 +527,10 @@ def analyze_project(project_id: int, session: Session = Depends(get_session)):
         if not topic:
             continue
         post.topic = topic
+        post.sub_topic = (result.get("sub_topic") or "").strip() or None
+        post.content_type = (result.get("content_type") or "").strip() or None
+        post.offer_pattern = (result.get("offer_pattern") or "").strip() or None
+        post.analysis_cta = (result.get("cta") or "").strip() or post.cta_text or None
         post.keywords_detected = ", ".join(keywords)
         session.add(post)
         analyzed_now += 1
@@ -537,6 +661,12 @@ def generate_project_ideas(project_id: int, body: IdeaRequest, session: Session 
             avoid_topics=previous_topics,
             business_name=project.target_business,
             focus_keywords=[k.text for k in session.exec(select(Keyword).where(Keyword.project_id == project_id)).all()],
+            previous_ideas=[{
+                "topic": idea.topic,
+                "draft_copy": idea.draft_copy,
+                "keywords": idea.keywords,
+                "source_trend": idea.source_trend,
+            } for idea in previous_ideas],
         )
     except AIProviderError as e:
         print(f"[generate-ideas] failed: {e}")
@@ -584,20 +714,20 @@ def delete_competitor(competitor_id: int, session: Session = Depends(get_session
     competitor = session.get(Competitor, competitor_id)
     if not competitor:
         raise HTTPException(status_code=404, detail="Competitor not found")
- 
+
     for post in session.exec(select(ScrapedPost).where(ScrapedPost.competitor_id == competitor_id)).all():
         session.delete(post)
     for log in session.exec(select(ScrapeLog).where(ScrapeLog.competitor_id == competitor_id)).all():
         session.delete(log)
     session.flush()  # children are gone before the rival itself is deleted
- 
+
     session.delete(competitor)
     session.commit()
     return {"status": "deleted"}
- 
- 
+
+
 # 2) ADD these two routes anywhere below the generate-ideas route.
- 
+
 @app.get(
     "/projects/{project_id}/ideas/",
     response_model=List[GeneratedIdeaResponse],
@@ -612,6 +742,24 @@ def list_project_ideas(
         .order_by(GeneratedIdea.id.desc())
     ).all()
 
+    project = session.get(Project, project_id)
+    current_name = ((project.target_business if project else "") or "").strip().casefold()
+
+    def image_is_current(idea: GeneratedIdea) -> bool:
+        # An image only counts if it was generated for the CURRENT business name.
+        return bool(
+            idea.image_data
+            and (idea.image_business_name or "").strip().casefold() == current_name
+        )
+
+    def image_url_for(idea: GeneratedIdea) -> Optional[str]:
+        if not image_is_current(idea):
+            return None
+        # ?v=<hash of the image bytes> changes whenever the image is regenerated,
+        # so the browser can never keep showing an older cached picture.
+        version = hashlib.md5(idea.image_data).hexdigest()[:12]
+        return f"/ideas/{idea.id}/image?v={version}"
+
     return [
         GeneratedIdeaResponse(
             id=idea.id,
@@ -624,12 +772,9 @@ def list_project_ideas(
             strategy_reason=idea.strategy_reason,
             keywords=idea.keywords,
             created_at=idea.created_at,
-            has_image=idea.image_data is not None,
-            image_url=(
-                f"/ideas/{idea.id}/image"
-                if idea.image_data
-                else None
-            ),
+            image_business_name=idea.image_business_name,
+            has_image=image_is_current(idea),
+            image_url=image_url_for(idea),
         )
         for idea in ideas
     ]
@@ -655,13 +800,26 @@ def generate_idea_image(
 
     try:
         project = session.get(Project, idea.project_id)
-        
+        current_name = ((project.target_business if project else "") or "").strip()
+
+        # Any business name this project's ideas/images used before. Old ideas can
+        # still mention it in their concept text, so the image prompt scrubs it out.
+        previous_names = sorted({
+            (i.image_business_name or "").strip()
+            for i in session.exec(
+                select(GeneratedIdea).where(GeneratedIdea.project_id == idea.project_id)
+            ).all()
+            if (i.image_business_name or "").strip()
+            and (i.image_business_name or "").strip().casefold() != current_name.casefold()
+        })
+
         result = generate_image(
             idea.image_concept,
             topic=idea.topic,
             draft_copy=idea.draft_copy,
             cta_suggested=idea.cta_suggested,
-            business_name=project.target_business if project else "",
+            business_name=current_name,
+            previous_business_names=previous_names,
         )
 
     except AIProviderError as e:
@@ -676,6 +834,7 @@ def generate_idea_image(
 
     idea.image_data = result["data"]
     idea.image_mime_type = result["mime_type"]
+    idea.image_business_name = (project.target_business or "").strip() if project else ""
 
     session.add(idea)
     session.commit()
@@ -709,10 +868,11 @@ def get_idea_image(
         content=idea.image_data,
         media_type=idea.image_mime_type or "image/png",
         headers={
-            "Cache-Control": "public, max-age=3600"
+            # The URL is versioned (?v=...), but never let a stale copy be reused.
+            "Cache-Control": "no-cache, must-revalidate"
         },
     )
- 
+
 @app.delete("/ideas/{idea_id}")
 def delete_idea(idea_id: int, session: Session = Depends(get_session)):
     idea = session.get(GeneratedIdea, idea_id)

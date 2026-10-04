@@ -47,7 +47,10 @@ input,select{font:inherit;padding:10px;border:3px solid var(--ink);background:#f
 .hit.on{background:var(--lime)}
 .n{background:var(--ink);color:var(--lime);width:28px;height:28px;display:grid;place-items:center;flex:none;font-weight:700}
 .pin{background:var(--lime);border:3px solid #111;box-shadow:3px 3px 0 #111;display:grid;place-items:center;font-weight:700;color:#111}
-.row{display:flex;justify-content:space-between;gap:10px;flex-wrap:wrap;align-items:center;border:3px solid var(--ink);padding:10px;margin-bottom:10px}
+.row{display:flex;justify-content:space-between;gap:14px;flex-wrap:nowrap;align-items:center;border:3px solid var(--ink);padding:10px;margin-bottom:10px}
+.row>div:first-child{flex:1 1 auto;min-width:0;overflow-wrap:anywhere}
+.row>div:last-child{flex:0 0 auto;display:flex;gap:8px;align-items:center;white-space:nowrap}
+@media(max-width:560px){.row{flex-wrap:wrap}.row>div:last-child{width:100%;justify-content:flex-end}}
 .txt{white-space:pre-wrap;margin:8px 0}
 .pcard{display:flex;align-items:stretch;padding:0;min-height:190px;overflow:hidden}
 .pbody{flex:1;min-width:0;padding:16px}
@@ -109,9 +112,11 @@ dialog label{display:block;margin:10px 0 4px;font-weight:700}dialog input{width:
 .focus-chip{display:inline-flex;align-items:center;gap:7px}
 .focus-chip button{display:inline-grid;place-items:center;width:20px;height:20px;margin-left:2px;border:2px solid #fff;background:#111;color:#fff;font:900 14px/1 Arial,sans-serif;border-radius:2px;cursor:pointer;padding:0;opacity:1}
 .focus-chip button:hover{background:#ffe600;color:#111;border-color:#111;transform:scale(1.08)}
-.keyword-hit{position:relative;display:inline-block;margin:7px 14px 5px 0;padding:5px 9px!important;border:3px solid #ffe600!important;background:#eaffb0!important;box-shadow:0 0 0 3px #111,0 0 12px rgba(255,230,0,.45);animation:keywordPulse 1s ease-in-out infinite alternate}
 .keyword-hit-label{position:absolute;right:-9px;top:-14px;background:#ffe600;color:#111;border:2px solid #111;padding:1px 5px;font:900 9px/1 Arial,sans-serif;letter-spacing:.4px;text-transform:uppercase}
-@keyframes keywordPulse{from{box-shadow:0 0 0 3px #111,0 0 5px rgba(255,230,0,.25)}to{box-shadow:0 0 0 3px #111,0 0 16px rgba(255,230,0,.9)}}
+.keyword-hit{position:relative;display:inline-block;margin:9px 16px 9px 8px;padding:5px 9px!important;border:2px solid #111!important;background:#eaffb0!important;box-shadow:0 0 0 3px #ffe600,0 0 0 7px #111,0 0 14px rgba(255,230,0,.5);animation:keywordPulse 1.15s ease-in-out infinite alternate}
+@keyframes keywordPulse{from{box-shadow:0 0 0 3px #ffe600,0 0 0 7px #111,0 0 6px rgba(255,230,0,.25)}to{box-shadow:0 0 0 3px #ffe600,0 0 0 7px #111,0 0 20px rgba(255,230,0,.95)}}
+.analysis-extra{margin-top:12px;display:flex;flex-wrap:wrap;gap:8px}.analysis-extra .mini{border:2px solid #d4ff3a;padding:5px 8px;background:#1a1a1a;color:#fff;font-size:12px}.analysis-extra .mini b{color:#d4ff3a;margin-right:4px}
+.repo-search{display:grid;grid-template-columns:minmax(220px,2fr) minmax(150px,1fr) auto;gap:8px;margin-bottom:12px}.repo-search input{min-width:0}@media(max-width:760px){.repo-search{grid-template-columns:1fr}}
 @media(max-width:760px){
   .idea-hero{grid-template-columns:1fr}
   .idea-proof{grid-template-columns:repeat(3,1fr)}
@@ -245,7 +250,12 @@ dialog label{display:block;margin:10px 0 4px;font-weight:700}dialog input{width:
         <span id="astat" style="font-weight:700"></span>
         <span class="empty">This can take a minute or two if the AI is busy. Please keep this page open.</span>
       </div>
-      <div class="bar-row" style="margin-bottom:16px"><select id="fc"></select><select id="ft"></select></div>
+      <div class="repo-search">
+        <input id="postq" placeholder="Search posts, titles, topics, CTAs or keywords…">
+        <input id="postkw" placeholder="Filter by keyword">
+        <button class="btn sm" id="postclear">Clear</button>
+      </div>
+      <div class="bar-row" style="margin-bottom:16px"><select id="fc"></select><select id="ft"></select><input id="datefrom" type="date" title="From date"><input id="dateto" type="date" title="To date"></div>
       <div id="posts"></div>
     </section>
 
@@ -309,7 +319,7 @@ const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt
 const sleep = ms => new Promise(r => setTimeout(r, ms));
 const ls = {get: k => { try { return JSON.parse(localStorage.getItem(k) || 'null'); } catch { return null; } },
             set: (k, v) => { try { localStorage.setItem(k, JSON.stringify(v)); } catch {} }};
-const ST = {never_run:'Not scraped yet', success:'Scraped ✓', captcha_blocked:'Google blocked this run, try again later', error:'Failed, try again'};
+const ST = {never_run:'Not scraped yet', success:'Scraped ✓', no_updates:'No Google updates posted yet', captcha_blocked:'Google blocked this run, try again later', error:'Failed, try again'};
 const busyComps = new Set();
 let pid = ls.get('pid'), comps = [], posts = [], hits = [], mk = [], map, layer;
 let focusKeywords = [];
@@ -359,16 +369,31 @@ $('#npf').onsubmit = async e => {
 async function refresh() {
   try {
     comps = await api(`/projects/${pid}/competitors/`);
-    posts = await api(`/projects/${pid}/posts/`);
+    await loadRepositoryPosts();
     drawComps(); await loadKw(); fillFilters(); drawPosts(); await dash(); await loadIdeas().catch(() => {});
   } catch (e) { toast('⚠ ' + e.message); }
 }
+async function loadRepositoryPosts() {
+  const params = new URLSearchParams();
+  const c = $('#fc')?.value, t = $('#ft')?.value;
+  if (c) params.set('competitor_id', c);
+  if (t) params.set('topic', t);
+  const q = $('#postq')?.value.trim(), kw = $('#postkw')?.value.trim();
+  const df = $('#datefrom')?.value, dt = $('#dateto')?.value;
+  if (q) params.set('q', q); if (kw) params.set('keyword', kw);
+  if (df) params.set('date_from', df); if (dt) params.set('date_to', dt);
+  posts = await api(`/projects/${pid}/posts/${params.toString() ? '?' + params.toString() : ''}`);
+}
 async function dash() {
   const d = await api(`/projects/${pid}/dashboard`);
-  $('#stats').innerHTML = [['Rivals', d.competitor_count], ['Posts collected', d.total_posts], ['Ideas made', d.generated_idea_count],
-    ['Last scrape', d.last_scrape ? new Date(d.last_scrape).toLocaleDateString() : 'never']]
-    .map(([a, b]) => `<div class="stat"><b>${esc(b)}</b><span>${a}</span></div>`).join('') +
-    (d.top_topics.length ? `<div class="stat wide"><span>Hot topics right now</span><br>${d.top_topics.map(t => `<i class="chip dark">${esc(t[0])} ·${t[1]}</i>`).join('')}</div>` : '');
+  $('#stats').innerHTML = [
+    ['Rivals', d.competitor_count], ['Posts collected', d.total_posts],
+    ['Analyzed', d.analyzed_posts], ['Ideas made', d.generated_idea_count],
+    ['Duplicates skipped', d.duplicates_skipped_total], ['Scrape failures', d.scrape_failures],
+  ].map(([a,b]) => `<div class="stat"><b>${esc(b)}</b><span>${a}</span></div>`).join('')
+    + `<div class="stat wide"><span>Repository health</span><br><i class="chip dark">${d.unanalyzed_posts} posts still need AI analysis</i><i class="chip dark">${d.new_posts_latest} new in latest scrape</i>${d.last_scrape ? `<i class="chip dark">Last scrape ${esc(new Date(d.last_scrape).toLocaleDateString())}</i>` : ''}</div>`
+    + (d.top_topics.length ? `<div class="stat wide"><span>Top topics</span><br>${d.top_topics.map(t => `<i class="chip dark">${esc(t[0])} · ${t[1]}</i>`).join('')}</div>` : '')
+    + (d.top_keywords.length ? `<div class="stat wide"><span>Most-used keywords</span><br>${d.top_keywords.map(t => `<i class="chip">${esc(t[0])} · ${t[1]}</i>`).join('')}</div>` : '');
 }
 
 /* ---------- tabs ---------- */
@@ -421,10 +446,10 @@ function drawHits() {
     const ll = coords(h.maps_url || '');
     if (ll) {
       const m = L.marker(ll, {icon: L.divIcon({className:'pin', html:i + 1, iconSize:[32, 32]})}).addTo(layer)
-        .bindPopup(`<b>${esc(h.name)}</b><br><button class="btn sm" onclick="add(${i})">Add as rival</button>`);
+        .bindPopup(`<b>${esc(h.name)}</b>${h.address ? `<br>${esc(h.address)}` : ''}<br><button class="btn sm" onclick="add(${i})">Add as rival</button>`);
       m.on('click', () => hl(i)); mk[i] = m; pts.push(ll);
     }
-    return `<div class="hit" data-i="${i}"><span class="n">${i + 1}</span><div style="flex:1;min-width:0"><b>${esc(h.name)}</b><br><a href="${esc(h.maps_url)}" target="_blank" rel="noopener">Open in Google Maps ↗</a>${ll ? '' : ' · <i>no map pin</i>'}</div><button class="btn sm" data-add="${i}">Add</button></div>`;
+    return `<div class="hit" data-i="${i}"><span class="n">${i + 1}</span><div style="flex:1;min-width:0"><b>${esc(h.name)}</b>${h.address ? `<br><span style="font-size:.85em;opacity:.75">📍 ${esc(h.address)}</span>` : ''}<br><a href="${esc(h.maps_url)}" target="_blank" rel="noopener">Open in Google Maps ↗</a>${ll ? '' : ' · <i>no map pin</i>'}</div><button class="btn sm" data-add="${i}">Add</button></div>`;
   }).join('') : '<p class="empty">Nothing found. Try another spelling, or add the area (e.g. "Cafe Leopold Colaba").</p>';
   if (pts.length) map.fitBounds(pts, {padding:[40, 40], maxZoom:16});
   setTimeout(() => map.invalidateSize(), 100);
@@ -441,7 +466,7 @@ $('#hits').onclick = e => {
 async function add(i) {
   const h = hits[i];
   try {
-    await api(`/projects/${pid}/competitors/`, {method:'POST', body:JSON.stringify({name:h.name, maps_url:h.maps_url, place_id:h.place_id})});
+    await api(`/projects/${pid}/competitors/`, {method:'POST', body:JSON.stringify({name:h.name, maps_url:h.maps_url, place_id:h.place_id, address:h.address || null})});
     toast(`Added ${h.name} ✓ Now press "Get their posts"`); map.closePopup(); refresh();
   } catch (e) { toast('⚠ ' + e.message); }
 }
@@ -453,8 +478,11 @@ function drawComps() {
   const n = {}; posts.forEach(p => n[p.competitor_id] = (n[p.competitor_id] || 0) + 1);
   $('#comps').innerHTML = comps.length ? comps.map(c => {
     const on = busyComps.has(c.id);
-    return `<div class="row"><div><b>${esc(c.name)}</b><br>
-    ${on ? '<i class="chip live">⏳ Collecting posts…</i>' : `<i class="chip ${c.last_scrape_status === 'success' ? 'dark' : ''}">${esc(ST[c.last_scrape_status] || c.last_scrape_status)}</i>`}<i class="chip">${n[c.id] || 0} posts</i></div>
+    const statusText = c.last_scrape_status === 'no_updates'
+      ? `${c.name} has not posted anything until now on google updates`
+      : (ST[c.last_scrape_status] || c.last_scrape_status);
+    return `<div class="row"><div><b>${esc(c.name)}</b>${c.address ? `<br><span style="font-size:.85em;opacity:.75">📍 ${esc(c.address)}</span>` : ''}<br>
+    ${on ? '<i class="chip live">⏳ Collecting posts…</i>' : `<i class="chip ${c.last_scrape_status === 'success' ? 'dark' : ''}">${esc(statusText)}</i>`}<i class="chip">${n[c.id] || 0} posts</i></div>
     <div><button class="btn sm${on ? ' busy' : ''}" data-a="scrape" data-id="${c.id}" ${on ? 'disabled' : ''}>${on ? 'Collecting…' : 'Get their posts'}</button> <button class="btn sm red" data-a="del" data-id="${c.id}" ${on ? 'disabled' : ''}>Remove</button></div></div>`;
   }).join('') : '<p class="empty">No rivals yet. Search above and press "Add".</p>';
 }
@@ -475,7 +503,13 @@ async function scrape(c) {
       await sleep(4000);
       const n = (await api(`/competitors/${c.id}/logs/`)).find(l => !seen.includes(l.id));
       if (n && n.status !== 'running') {
-        toast(n.status === 'success' ? `Done: ${n.new_posts} new posts (${n.duplicates_skipped} already saved)` : '⚠ ' + (n.error_message || ST[n.status]));
+        toast(n.status === 'no_updates'
+          ? 'ℹ ' + n.error_message
+          : n.status !== 'success'
+          ? '⚠ ' + (n.error_message || ST[n.status])
+          : n.up_to_date
+            ? 'Posts are up to date ✓ No new posts to add.'
+            : `Done: ${n.new_posts} new posts` + (n.duplicates_skipped ? ` (stopped early after reaching posts already saved)` : ''));
         finished = true; break;
       }
     }
@@ -542,12 +576,20 @@ function drawPosts() {
     }).join('');
     const img = p.image_url ? `<a class="pside" href="${esc(p.image_url)}" target="_blank" rel="noopener"><img class="pimg" src="${esc(p.image_url)}" alt="Post image" loading="lazy" referrerpolicy="no-referrer" onload="fitImg(this)" onerror="this.parentElement.remove()"></a>` : '';
     const vid = !p.image_url && p.video_url ? `<div class="pside pvid"><video class="pvideo" src="${esc(p.video_url)}" controls playsinline preload="metadata" referrerpolicy="no-referrer" onerror="vidFail(this)"></video></div>` : '';
-    const ext = (p.topic || detectedKeywords.length) ? `<div class="pext"><div class="ptag">AI analysis</div><div class="pcols"><div><small>Topic</small><span class="k big">${esc(p.topic)}</span></div><div><small>Keywords</small>${kw || '<span class="k">none</span>'}</div></div></div>` : '';
+    const ext = (p.topic || detectedKeywords.length || p.sub_topic) ? `<div class="pext"><div class="ptag">AI analysis</div><div class="pcols"><div><small>Topic</small><span class="k big">${esc(p.topic || '—')}</span></div><div><small>Keywords</small>${kw || '<span class="k">none</span>'}</div></div><div class="analysis-extra">
+      ${p.sub_topic ? `<span class="mini"><b>Sub-topic</b>${esc(p.sub_topic)}</span>` : ''}
+      ${p.content_type ? `<span class="mini"><b>Type</b>${esc(p.content_type)}</span>` : ''}
+      ${p.offer_pattern && p.offer_pattern.toLowerCase() !== 'none' ? `<span class="mini"><b>Offer</b>${esc(p.offer_pattern)}</span>` : ''}
+      ${p.analysis_cta && p.analysis_cta.toLowerCase() !== 'none' ? `<span class="mini"><b>CTA</b>${esc(p.analysis_cta)}</span>` : ''}
+    </div></div>` : '';
     return `<div class="pwrap${p.topic ? ' ana' : ''}"><article class="card pcard"><div class="pbody"><div><b>${esc(cn(p.competitor_id))}</b>${p.cta_text ? ` <i class="chip">Button: ${esc(p.cta_text)}</i>` : ''}</div><p class="txt">${esc(p.content)}</p>${postLink(p)}</div>${img}${vid}</article>${ext}</div>`;
   }).join('') + (L.length > 80 ? `<p class="empty">Showing 80 of ${L.length}. Use the filters to narrow down.</p>` : '')
     : '<p class="empty">No posts to show yet. Add a rival and press "Get their posts" first.</p>';
 }
-$('#fc').onchange = $('#ft').onchange = drawPosts;
+$('#fc').onchange = $('#ft').onchange = async () => { await loadRepositoryPosts(); drawPosts(); };
+let repoTimer;
+['postq','postkw','datefrom','dateto'].forEach(id => { const el = document.getElementById(id); if (el) el.addEventListener('input', () => { clearTimeout(repoTimer); repoTimer = setTimeout(async () => { await loadRepositoryPosts(); drawPosts(); }, 250); }); });
+$('#postclear').onclick = async () => { ['postq','postkw','datefrom','dateto'].forEach(id => { const e=$('#'+id); if(e) e.value=''; }); await loadRepositoryPosts(); drawPosts(); };
 
 /* ---------- analysis + trends ---------- */
 let trendChart = null;
