@@ -324,7 +324,7 @@ dialog label{display:block;margin:10px 0 4px;font-weight:700}dialog input{width:
 
 <script src="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.js"></script>
 <script>
-const API = location.protocol === 'file:' ? 'https://competitor-radar-1.onrender.com/' : '';   // '' = the server that served this page
+const API = location.protocol === 'file:' ? 'https://competitor-radar-1.onrender.com' : '';   // '' = the server that served this page
 const $ = s => document.querySelector(s);
 const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 const sleep = ms => new Promise(r => setTimeout(r, ms));

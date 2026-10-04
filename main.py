@@ -104,7 +104,7 @@ app = FastAPI(title="Google Maps Competitor Update Intelligence API")
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
 
 async def keep_alive():
-    app_url = "https://competitor-radar-dqeq.onrender.com/health"
+    app_url = "https://competitor-radar-1.onrender.com/health"
     await asyncio.sleep(10)  # Wait 10s after startup
     while True:
         try:
