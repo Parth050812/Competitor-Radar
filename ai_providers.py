@@ -4,6 +4,7 @@ import json
 import time
 import base64
 import random
+import hashlib
 from collections import Counter
 from datetime import date, datetime, timedelta
 from typing import List, Dict, Any, Optional
@@ -1062,3 +1063,124 @@ COMPOSITION: The product is the hero. Leave a clean, uncluttered area directly b
         raise AIProviderError(
             f"Hugging Face image generation failed: {msg[:300]}"
         ) from e
+
+
+# ==========================================
+# Spot Trends: plain-English chart explanation (Hugging Face text model)
+# ==========================================
+# A text model cannot "see" the chart, so it is given the exact numbers the chart
+# is drawn from (find_trends output). That is more reliable than reading pixels.
+#
+# .env (all optional, HF_TOKEN is already required for images):
+#   HF_EXPLAIN_MODELS=Qwen/Qwen2.5-72B-Instruct,meta-llama/Llama-3.1-8B-Instruct
+#   HF_EXPLAIN_PROVIDER=auto
+# The models are tried in order; if one is not served for your token/provider
+# the next one is used.
+
+HF_EXPLAIN_PROVIDER = os.getenv("HF_EXPLAIN_PROVIDER", "auto")
+HF_EXPLAIN_MODELS = [
+    m.strip()
+    for m in os.getenv(
+        "HF_EXPLAIN_MODELS",
+        "Qwen/Qwen2.5-72B-Instruct,meta-llama/Llama-3.1-8B-Instruct,Qwen/Qwen2.5-7B-Instruct",
+    ).split(",")
+    if m.strip()
+]
+
+explain_client = (
+    InferenceClient(provider=HF_EXPLAIN_PROVIDER, api_key=_HF_TOKEN)
+    if _HF_TOKEN
+    else None
+)
+
+# Same trend data -> same explanation. A new analysis changes the numbers, which
+# changes the key, which triggers a fresh explanation automatically.
+_EXPLAIN_CACHE: Dict[str, Dict[str, Any]] = {}
+
+
+def _trend_fingerprint(trend_rows: List[Dict[str, Any]]) -> str:
+    payload = json.dumps(trend_rows, sort_keys=True, ensure_ascii=False, default=str)
+    return hashlib.md5(payload.encode("utf-8")).hexdigest()
+
+
+def explain_trends(
+    trend_rows: List[Dict[str, Any]],
+    groups: Optional[List[Dict[str, Any]]] = None,
+    business_name: str = "",
+    force: bool = False,
+) -> Dict[str, Any]:
+    """
+    Ask a free Hugging Face model to explain the Spot Trends chart.
+
+    Returns {"text": str, "model": str, "cached": bool}.
+    Raises AIProviderError if no model could answer.
+    """
+    if not trend_rows:
+        raise AIProviderError("No trend data to explain yet. Analyze posts first.")
+    if explain_client is None:
+        raise AIProviderError("HF_TOKEN is not configured. Add your Hugging Face token to .env.")
+
+    key = _trend_fingerprint(trend_rows) + "|" + (business_name or "")
+    if not force and key in _EXPLAIN_CACHE:
+        return {**_EXPLAIN_CACHE[key], "cached": True}
+
+    chart = [
+        {
+            "topic": r["topic"],
+            "rivals_using": f"{r['competitors_using']} of {r['total_competitors']}",
+            "coverage_pct": r["occurrence_pct"],
+            "posts": r["post_count"],
+            "latest_post": r.get("latest_post_date"),
+        }
+        for r in trend_rows[:12]
+    ]
+    keywords = {
+        g["trending_topic"]: g.get("top_keywords", [])
+        for g in (groups or [])
+    }
+
+    system = (
+        "You are a local-marketing analyst explaining a bar chart to a busy business owner. "
+        "Use ONLY the numbers given. Never invent topics, percentages or competitors. "
+        "Write plain English, no jargon."
+    )
+    user = f"""The bar chart "Spot trends" shows, for each topic, the % of tracked rival businesses that posted about it at least once on Google Maps. It is coverage across rivals, NOT share of all posts.
+{('Our business: ' + business_name) if business_name else ''}
+
+CHART DATA (highest coverage first):
+{json.dumps(chart, ensure_ascii=False, indent=1)}
+
+TOP KEYWORDS PER LEADING TOPIC:
+{json.dumps(keywords, ensure_ascii=False)}
+
+Write the explanation in this format (short, about 150 words total):
+1. One sentence: what the chart shows overall.
+2. "What stands out": 2-3 short bullet points (leading topics, gaps between bars, topics only one rival uses).
+3. "What to do": 2 short bullet points on what our business should post or avoid copying.
+"""
+
+    last_error: Optional[Exception] = None
+    for model in HF_EXPLAIN_MODELS:
+        try:
+            print(f"[TREND EXPLAIN] asking {model}")
+            resp = explain_client.chat_completion(
+                model=model,
+                messages=[
+                    {"role": "system", "content": system},
+                    {"role": "user", "content": user},
+                ],
+                max_tokens=450,
+                temperature=0.3,
+            )
+            text = (resp.choices[0].message.content or "").strip()
+            if len(text) < 40:
+                raise ValueError("model returned a too-short answer")
+            result = {"text": text, "model": model}
+            _EXPLAIN_CACHE[key] = result
+            return {**result, "cached": False}
+        except Exception as e:
+            last_error = e
+            print(f"[TREND EXPLAIN] {model} failed: {' '.join(str(e).split())[:300]}")
+            continue
+
+    raise AIProviderError(f"No Hugging Face model could explain the chart. Last error: {last_error}")

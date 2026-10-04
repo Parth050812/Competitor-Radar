@@ -14,6 +14,7 @@ from ai_providers import (
     generate_ideas,
     generate_image,
     find_trends,
+    explain_trends,
     AIProviderError,
 )# simple wrapper module, see below
 from fastapi.middleware.cors import CORSMiddleware
@@ -544,8 +545,8 @@ def analyze_project(project_id: int, session: Session = Depends(get_session)):
     }
 
 
-@app.get("/projects/{project_id}/trends/")
-def project_trends(project_id: int, session: Session = Depends(get_session)):
+def _trend_inputs(project_id: int, session: Session):
+    """Shared by the chart route and the explanation route so both use identical data."""
     competitors = session.exec(select(Competitor).where(Competitor.project_id == project_id)).all()
     competitor_ids = [c.id for c in competitors]
     posts = (
@@ -555,8 +556,7 @@ def project_trends(project_id: int, session: Session = Depends(get_session)):
         if competitor_ids
         else []
     )
-
-    trend_rows, _, _, _ = find_trends(
+    return find_trends(
         posts=[
             {
                 "content": p.content,
@@ -568,7 +568,39 @@ def project_trends(project_id: int, session: Session = Depends(get_session)):
             for p in posts
         ]
     )
+
+
+@app.get("/projects/{project_id}/trends/")
+def project_trends(project_id: int, session: Session = Depends(get_session)):
+    trend_rows, _, _, _ = _trend_inputs(project_id, session)
     return trend_rows
+
+
+@app.get("/projects/{project_id}/trends/explanation/")
+def project_trend_explanation(
+    project_id: int,
+    refresh: bool = False,
+    session: Session = Depends(get_session),
+):
+    """AI (Hugging Face) plain-English explanation of the Spot Trends chart."""
+    trend_rows, groups, _, _ = _trend_inputs(project_id, session)
+    if not trend_rows:
+        raise HTTPException(status_code=400, detail="No trends yet. Analyze posts first.")
+
+    project = session.get(Project, project_id)
+    try:
+        return explain_trends(
+            trend_rows,
+            groups,
+            business_name=(project.target_business if project else "") or "",
+            force=refresh,
+        )
+    except AIProviderError as e:
+        print(f"[trend-explanation] failed: {e}")
+        raise HTTPException(
+            status_code=503,
+            detail="The explanation model is busy or unavailable. Please try again in a minute.",
+        )
 
 
 def _strategy_reason(idea: dict, trend_rows: list[dict], focus_keywords: Optional[list[str]] = None) -> str:
@@ -848,6 +880,7 @@ def generate_idea_image(
 @app.get("/ideas/{idea_id}/image")
 def get_idea_image(
     idea_id: int,
+    download: bool = False,
     session: Session = Depends(get_session),
 ):
     idea = session.get(GeneratedIdea, idea_id)
@@ -864,13 +897,19 @@ def get_idea_image(
             detail="Image has not been generated yet.",
         )
 
+    mime = idea.image_mime_type or "image/png"
+    headers = {
+        # The URL is versioned (?v=...), but never let a stale copy be reused.
+        "Cache-Control": "no-cache, must-revalidate"
+    }
+    if download:
+        ext = {"image/png": "png", "image/jpeg": "jpg", "image/webp": "webp"}.get(mime, "png")
+        headers["Content-Disposition"] = f'attachment; filename="idea-{idea.id}.{ext}"'
+
     return Response(
         content=idea.image_data,
-        media_type=idea.image_mime_type or "image/png",
-        headers={
-            # The URL is versioned (?v=...), but never let a stale copy be reused.
-            "Cache-Control": "no-cache, must-revalidate"
-        },
+        media_type=mime,
+        headers=headers,
     )
 
 @app.delete("/ideas/{idea_id}")

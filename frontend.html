@@ -90,6 +90,15 @@ dialog label{display:block;margin:10px 0 4px;font-weight:700}dialog input{width:
 .trend-insight b{display:block;font-size:20px;color:var(--lime)}
 .trend-insight span{font-size:12px;text-transform:uppercase}
 
+.trend-ai{margin-top:18px;background:#fff;border:3px solid #111;padding:18px 20px;box-shadow:5px 5px 0 #111}
+.trend-ai-head{display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin-bottom:8px}
+.trend-ai-head h3{margin:0;flex:1;min-width:180px}
+.trend-ai-model{font-size:11px;font-weight:700;text-transform:uppercase;background:#111;color:#d4ff3a;padding:2px 7px}
+.trend-ai-body{white-space:pre-wrap;line-height:1.55}
+.trend-ai-body.loading{color:#777}
+.idea-dl{position:absolute;right:10px;bottom:10px;background:#d4ff3a;color:#111;border:2px solid #111;box-shadow:3px 3px 0 #111;padding:6px 10px;font-size:12px;font-weight:700;text-transform:uppercase;text-decoration:none;cursor:pointer}
+.idea-dl:hover{background:#fff}
+
 /* ---------- idea strategy header + audit labels ---------- */
 .idea-hero{display:grid;grid-template-columns:minmax(0,1fr) 360px;gap:20px;background:#111;color:#fff;border:3px solid var(--ink);box-shadow:6px 6px 0 var(--ink);padding:22px;margin-bottom:18px}
 .idea-hero .eyebrow{display:inline-block;background:var(--lime);color:var(--ink);border:2px solid var(--lime);padding:2px 8px;font-size:12px;font-weight:700;text-transform:uppercase;margin-bottom:8px}
@@ -138,6 +147,7 @@ dialog label{display:block;margin:10px 0 4px;font-weight:700}dialog input{width:
 .idea-content .txt{margin-top:4px}
 
 .idea-image-side {
+  position: relative;
   min-height: 240px;
   border-radius: 12px;
   overflow: hidden;
@@ -266,6 +276,7 @@ dialog label{display:block;margin:10px 0 4px;font-weight:700}dialog input{width:
         <p class="empty" style="margin-top:0">Each bar is the percentage of tracked rivals using that topic at least once.</p>
         <div class="trend-chart-wrap" id="trendChartWrap"><canvas id="trendChart"></canvas></div>
         <div id="trendExplainer"></div>
+        <div id="trendAI"></div>
         <div id="trends" hidden></div>
       </div>
     </section>
@@ -605,6 +616,7 @@ async function trends() {
   if (!t.length) {
     wrap.innerHTML = '<p class="empty">No trends yet. Go to "Read their posts" and press "Analyze all posts with AI" first.</p>';
     explainer.innerHTML = '';
+    $('#trendAI').innerHTML = '';
     renderIdeaStrategy([]);
     return;
   }
@@ -663,7 +675,41 @@ async function trends() {
     </div>`;
 
   renderIdeaStrategy(t);
+  loadTrendExplanation(false);   // runs in the background, never blocks the chart
 }
+
+/* ---------- AI explanation of the chart (Hugging Face) ---------- */
+let trendAIReq = 0;
+async function loadTrendExplanation(refresh) {
+  const box = $('#trendAI');
+  if (!box) return;
+  const req = ++trendAIReq;   // ignore stale answers if the data changed meanwhile
+  box.innerHTML = `<div class="trend-ai"><div class="trend-ai-head"><h3>🤖 AI explanation of this chart</h3></div><div class="trend-ai-body loading">Reading the chart and writing an explanation…</div></div>`;
+  try {
+    const r = await api(`/projects/${pid}/trends/explanation/${refresh ? '?refresh=true' : ''}`);
+    if (req !== trendAIReq) return;
+    box.innerHTML = `
+      <div class="trend-ai">
+        <div class="trend-ai-head">
+          <h3>🤖 AI explanation of this chart</h3>
+          <span class="trend-ai-model">${esc(r.model.split('/').pop())}</span>
+          <button class="btn sm" id="trendAIRefresh">Regenerate</button>
+        </div>
+        <div class="trend-ai-body">${esc(r.text)}</div>
+      </div>`;
+  } catch (e) {
+    if (req !== trendAIReq) return;
+    box.innerHTML = `
+      <div class="trend-ai">
+        <div class="trend-ai-head"><h3>🤖 AI explanation of this chart</h3><button class="btn sm" id="trendAIRefresh">Try again</button></div>
+        <div class="trend-ai-body loading">Could not generate the explanation: ${esc(e.message)}</div>
+      </div>`;
+  }
+}
+document.addEventListener('click', e => {
+  const b = e.target.closest('#trendAIRefresh');
+  if (b) loadTrendExplanation(true);
+});
 function renderIdeaStrategy(t) {
   $('#ideaTrendCount').textContent = t.length || '0';
   const top = t.slice(0, 3);
@@ -717,6 +763,12 @@ function drawIdeas() {
                   '<span>Image could not be loaded</span>' +
                   '</div>'"
               >
+              <a
+                class="idea-dl"
+                href="${esc(API + i.image_url)}${i.image_url.includes('?') ? '&' : '?'}download=true"
+                download="idea-${i.id}.png"
+                title="Download this image"
+              >⬇ Download</a>
             </div>
           `
           : `
