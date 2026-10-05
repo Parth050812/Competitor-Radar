@@ -27,6 +27,17 @@ Competitor Radar collects the **Google Maps Updates** (posts) that competitor bu
 
 ---
 
+[![Live Demo](https://img.shields.io/badge/Live%20Demo-Render-blue?style=for-the-badge&logo=render)](https://competitor-radar-1.onrender.com/)
+
+---
+
+## 📹 Video Walkthrough
+
+[![Competitor Radar Video Walkthrough](https://img.youtube.com/vi/Qm6aHZMNrnQ/maxresdefault.jpg)](https://youtu.be/Qm6aHZMNrnQ)
+
+
+---
+
 ## Features
 
 | Area | What you get |
